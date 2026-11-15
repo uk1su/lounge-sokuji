@@ -48,3 +48,5 @@ OBSを終了し、バックアップのbin/dataを戻し、元のDLLハッシュ
 ソース・文書・非秘密のラベルだけをGitへ入れる。DLL・ZIP・PDB・依存SDK・実画像・生の監査JSONはGitへ入れない。バイナリを公開する場合は対応するソースのコミット、ライセンス、検証範囲を添える。リポジトリの公開範囲にも注意する。
 
 コミット済みのソースから配布物を作る場合は、tools/package.ps1を使用できます。BuildDir、OutputDir、TlsBackendを指定すると、GitのコミットID・各ファイルのSHA-256をmanifest.jsonへ記録し、対応する全追跡ソースを同梱します。既存の配布フォルダーは削除しません。
+
+Qt 6.11系のTLSバックエンドを取得する例: 公式Qt配布物、または `python -m pip download --no-deps PySide6_Essentials==6.11.2 -d C:\dev\qt-runtime-download` で対応するWindows wheelを取得し、ZIPとして展開したPySide6/plugins/tlsから選ぶ方法がある。実行先のQtと版が合うことをファイル情報で確認し、対応するQtライセンス・ソース案内も同梱する。wheel全体やQt本体をOBSへコピーしない。
