@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
       broken["answers"] = ba;
       require(!parseJevResponse(broken, captured, tags).error.isEmpty(),
               "invalid probabilities rejected");
-      require(jevMontage(captured.image).size() == QSize(960, 576),
+      require(jevMontage(captured.image).size() == QSize(480, 448),
               "vision dimensions within official limits");
       const auto request = jevRequest(tags, "unique-image-reference");
       require(request["questions"].toObject().size() == 12 &&

@@ -36,7 +36,7 @@ bool obs_module_load(void)
     g_dock = nullptr;
     return false;
   }
-  blog(LOG_INFO, "[MK8DX QuickScore] loaded (0.8.0 TypeSafe Jev API, result captures)");
+  blog(LOG_INFO, "[MK8DX QuickScore] loaded (0.8.1 TypeSafe Jev API, result captures)");
   return true;
 }
 

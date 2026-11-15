@@ -33,45 +33,32 @@ bool probability(const QJsonValue &v) {
 QImage jevMontage(const QImage &frame) {
   if (frame.size() != QSize(1920, 1080))
     return {};
-  QImage image(960, 576, QImage::Format_RGB32);
+  QImage image(480, 448, QImage::Format_RGB32);
   image.fill(QColor(32, 32, 32));
   QPainter p(&image);
   p.setPen(Qt::white);
   auto font = p.font();
-  font.setPixelSize(18);
+  font.setPixelSize(14);
   p.setFont(font);
   for (int row = 0; row < 12; ++row) {
-    const int x = (row % 3) * 320, y = (row / 3) * 144;
-    p.drawText(x + 12, y + 21, QString("Rank %1").arg(row + 1));
-    p.drawImage(QRect(x + 16, y + 28, 288, 108), frame.copy(1013, 85 + 78 * row, 144, 54));
+    const int x = (row % 3) * 160, y = (row / 3) * 112;
+    p.drawText(x + 6, y + 17, QString("Rank %1").arg(row + 1));
+    p.drawImage(QRect(x + 6, y + 23, 138, 81), frame.copy(1013, 85 + 78 * row, 92, 54));
   }
   return image;
 }
 QJsonObject jevRequest(const std::vector<std::string> &tags, const QString &reference) {
   QJsonObject criteria, questions;
   for (size_t i = 0; i < tags.size(); ++i)
-    criteria.insert(QString("team%1").arg(i),
-                    QString("The very FIRST visible character is '%1'. Team tag: '%2'. Compare "
-                            "actual case and kana visually; do not use any later character.")
-                        .arg(first(tags[i]), QString::fromStdString(tags[i])));
-  criteria.insert("unknown", "The first character is obscured, ambiguous, unreadable, or belongs "
-                             "to none of these teams. Do not infer from team counts.");
+    criteria.insert(QString("team%1").arg(i), first(tags[i]));
+  criteria.insert("unknown", "Unreadable or no match.");
   for (int row = 0; row < 12; ++row)
-    questions.insert(
-        QString("rank%1").arg(row + 1),
-        QJsonObject{
-            {"type", "choice"},
-            {"criteria", criteria},
-            {"instructions",
-             QString("In `montage`, identify ONLY the very first character of the player name in "
-                     "the cell labelled Rank %1 (row %2, column %3; rows and columns start at 1). "
-                     "Ignore all other cells and the rest of the name. Choose unknown if not "
-                     "clearly legible. Do not balance team sizes.")
-                 .arg(row + 1)
-                 .arg(row / 3 + 1)
-                 .arg(row % 3 + 1)}});
+    questions.insert(QString("rank%1").arg(row + 1),
+                     QJsonObject{{"type", "choice"}, {"criteria", criteria},
+                                 {"instructions", QString("First name character at Rank %1, row %2, column %3?")
+                                                      .arg(row + 1).arg(row / 3 + 1).arg(row % 3 + 1)}});
   return {{"model", "jev-1.14.0"},
-          {"state", QJsonObject{{"montage", reference}}},
+          {"state", QJsonObject{{"montage", reference}, {"rules", "Read only the FIRST character of each player name. Ignore suffixes and team counts. Choose unknown if obscured or ambiguous."}}},
           {"assets", QJsonObject{{reference, QJsonObject{{"type", "image"}, {"part", "montage"}}}}},
           {"questions", questions}};
 }

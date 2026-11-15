@@ -22,3 +22,7 @@ settings.ini
 session.json
 local-runtime.json
 score.txt
+
+/dist/
+/CMakeFiles/
+/CMakeCache.txt

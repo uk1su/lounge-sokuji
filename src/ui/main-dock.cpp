@@ -94,7 +94,7 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   auto *body = new QWidget;
   scroll->setWidget(body);
   auto *layout = new QVBoxLayout(body);
-  auto *title = new QLabel(tr("QUICKSCORE  0.8.0 / Jev API"));
+  auto *title = new QLabel(tr("QUICKSCORE  0.8.1 / Jev API"));
   title->setStyleSheet("font-size:20px;font-weight:700;");
   layout->addWidget(title);
   auto *setup = new QGroupBox(tr("ゲーム映像とチーム"));
@@ -727,7 +727,7 @@ void MainDock::requestRecognition(const Analysis &captured) {
     tags.append(QString::fromStdString(tag));
   const auto capture = saveResultCapture(
       QDir(configDirectory_).absoluteFilePath("captures"), captured.image,
-      QJsonObject{{"version", "0.8.0"},
+      QJsonObject{{"version", "0.8.1"},
                   {"source", source_->currentText()},
                   {"frameReceivedAt", latestFrameReceivedAt_.toString(Qt::ISODateWithMs)},
                   {"format", format_->currentText()},
@@ -1153,7 +1153,7 @@ void MainDock::exportDiagnostic() {
     return;
   }
   QSaveFile file(base + ".json");
-  const auto data = QJsonDocument(QJsonObject{{"version", "0.8.0"},
+  const auto data = QJsonDocument(QJsonObject{{"version", "0.8.1"},
                                               {"source", source_->currentText()},
                                               {"anchors", a.layout.anchors},
                                               {"pluses", a.layout.pluses},
