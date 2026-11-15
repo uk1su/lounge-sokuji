@@ -1,0 +1,9 @@
+transformers==5.17.0
+peft==0.21.0
+accelerate==1.15.0
+safetensors==0.8.0
+bitsandbytes==0.50.2
+tokenizers==0.23.2
+huggingface_hub==1.33.0
+pillow==12.3.0
+numpy==2.2.6

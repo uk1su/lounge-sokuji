@@ -1,0 +1,6 @@
+Visual Jev source: https://github.com/guanxuyu-sv/Visual-Jev
+Revision: a392eaedfa41adae348f9767b55c0f54b3a13b57
+See LICENSE for the upstream Apache-2.0 license.
+QuickScore modifications: optional BitsAndBytes quantization on load, and
+bounded suffix batches sharing a single image/prefix cache.
+Model weights and their licenses are separate from this source distribution.
