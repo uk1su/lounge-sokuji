@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(mk8dx-quickscore VERSION 0.8.1 LANGUAGES CXX)
+project(mk8dx-quickscore VERSION 0.8.3 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -8,6 +8,28 @@ if(MSVC)
 endif()
 set(QUICKSCORE_DEPENDENCIES "" CACHE PATH "Prepared OBS SDK directory containing include/ and lib/")
 set(CPPWINRT_GENERATED "" CACHE PATH "Optional generated C++/WinRT projection")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/local-secrets.cmake")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/local-secrets.cmake")
+endif()
+set(QUICKSCORE_EMBEDDED_JEV_API_KEY "" CACHE STRING "Optional embedded TypeSafe Jev API key")
+set(QUICKSCORE_EMBEDDED_BOT_ENDPOINT "" CACHE STRING "Optional embedded discord_bot lounge ingest URL")
+set(QUICKSCORE_EMBEDDED_BOT_CHANNEL_ID "" CACHE STRING "Optional embedded discord_bot channel ID")
+set(QUICKSCORE_EMBEDDED_BOT_INGEST_KEY "" CACHE STRING "Optional embedded discord_bot ingest key")
+
+function(quickscore_escape_c var_in var_out)
+  string(REPLACE "\\" "\\\\" _tmp "${${var_in}}")
+  string(REPLACE "\"" "\\\"" _tmp "${_tmp}")
+  set(${var_out} "${_tmp}" PARENT_SCOPE)
+endfunction()
+quickscore_escape_c(QUICKSCORE_EMBEDDED_JEV_API_KEY QUICKSCORE_EMBEDDED_JEV_API_KEY_ESC)
+quickscore_escape_c(QUICKSCORE_EMBEDDED_BOT_ENDPOINT QUICKSCORE_EMBEDDED_BOT_ENDPOINT_ESC)
+quickscore_escape_c(QUICKSCORE_EMBEDDED_BOT_CHANNEL_ID QUICKSCORE_EMBEDDED_BOT_CHANNEL_ID_ESC)
+quickscore_escape_c(QUICKSCORE_EMBEDDED_BOT_INGEST_KEY QUICKSCORE_EMBEDDED_BOT_INGEST_KEY_ESC)
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embedded-secrets.hpp.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded-secrets.hpp"
+  @ONLY
+)
 if(QUICKSCORE_DEPENDENCIES)
   foreach(component IN ITEMS libobs obs-frontend-api)
     if(component STREQUAL "libobs")
@@ -26,17 +48,18 @@ else()
 endif()
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
-set(core_sources src/core/analysis.cpp src/core/finish-notice.cpp src/core/native-ocr.cpp
-    src/core/scoring.cpp src/core/session-store.cpp src/reference/image.cpp src/reference/recognizer.cpp
-    src/core/fast-reader.cpp)
-set(dock_sources src/ui/main-dock.cpp src/obs/frame-capture.cpp src/obs/scoreboard-source.cpp
-    src/core/credential-store.cpp src/core/discord-sender.cpp src/core/local-reader.cpp
-    src/core/result-capture.cpp src/core/jev-api-reader.cpp)
+set(core_sources src/core/analysis.cpp src/core/course.cpp src/core/finish-notice.cpp src/core/native-ocr.cpp
+    src/core/overlay.cpp src/core/score-digits.cpp src/core/scoring.cpp src/core/session-store.cpp
+    src/reference/image.cpp src/reference/recognizer.cpp src/core/fast-reader.cpp)
+set(dock_sources src/ui/main-dock.cpp src/obs/frame-capture.cpp src/obs/overlay-server.cpp
+    src/obs/scoreboard-source.cpp src/core/credential-store.cpp src/core/discord-sender.cpp
+    src/core/local-reader.cpp src/core/result-capture.cpp src/core/jev-api-reader.cpp)
 function(configure_core target)
-  target_include_directories(${target} PRIVATE src/core src/obs src/ui)
+  target_include_directories(${target} PRIVATE src/core src/obs src/ui "${CMAKE_CURRENT_BINARY_DIR}/generated")
   if(CPPWINRT_GENERATED)
     target_include_directories(${target} BEFORE PRIVATE "${CPPWINRT_GENERATED}")
   endif()
+  target_compile_definitions(${target} PRIVATE QUICKSCORE_VERSION="${PROJECT_VERSION}")
   target_link_libraries(${target} PRIVATE Qt6::Core Qt6::Gui)
   if(WIN32)
     target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

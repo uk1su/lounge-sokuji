@@ -6,7 +6,11 @@ namespace quickscore {
 // Screen presence is determined by rank anchors, never by OCR success.
 class ResultGate {
 public:
-  bool observe(bool visible, bool complete, const std::string &candidate, uint64_t now) {
+  bool observe(bool visible,
+               bool complete,
+               const std::string &candidate,
+               uint64_t now,
+               bool immediate = false) {
     if (last_ && (now < last_ || now - last_ > 5000))
       clearCandidate();
     const bool continuous = last_ && now >= last_ && now - last_ <= 1000;
@@ -27,6 +31,11 @@ public:
     if (!armed_ || locked_ || !complete || candidate.empty()) {
       clearCandidate();
       return false;
+    }
+    if (immediate) {
+      locked_ = true;
+      clearCandidate();
+      return true;
     }
     if (candidate != candidate_) {
       candidate_ = candidate;

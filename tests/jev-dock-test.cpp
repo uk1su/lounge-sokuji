@@ -1,3 +1,4 @@
+#include "credential-store.hpp"
 #include "main-dock.hpp"
 #include "mock-http.hpp"
 #include "result-capture.hpp"
@@ -16,7 +17,6 @@
 #include <QPalette>
 #include <QPushButton>
 #include <QSettings>
-#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QThread>
 #include <iostream>
@@ -126,17 +126,21 @@ int main(int argc, char **argv) {
     auto *start = dock->findChild<QPushButton *>("start");
     auto *scores = dock->findChild<QLabel *>("scores");
     auto *state = dock->findChild<QLabel *>("status");
-    auto *table = dock->findChild<QTableWidget *>("correction");
-    require(start && scores && state && table, "native widgets");
+    auto *preview = dock->findChild<quickscore::ResultPreviewWidget *>("preview");
+    auto *stop = dock->findChild<QPushButton *>("stop");
+    require(start && stop && scores && state && preview, "native widgets");
+    auto *postDiscord = dock->findChild<QCheckBox *>("postDiscord");
+    require(postDiscord && !postDiscord->isChecked(), "Discord post defaults to unchecked");
     require(!dock->findChild<QComboBox *>("recognitionMode") &&
-                !dock->findChild<QLineEdit *>("geminiKey"),
-            "Jev-only UI without cloud API fields");
-    require(!dock->findChild<QCheckBox *>("autoCommit")->isChecked(),
-            "default manual confirmation");
+                !dock->findChild<QLineEdit *>("geminiKey") &&
+                !dock->findChild<QCheckBox *>("autoCommit") &&
+                !dock->findChild<QPushButton *>("jevAssist") &&
+                !dock->findChild<QPushButton *>("discordSend"),
+            "Streamlined Lounge UI without removed controls");
     const QDir captures(config.path() + "/captures");
     auto captureFiles = [&] { return captures.entryList({"*.json"}, QDir::Files, QDir::Name); };
-    require(dock->findChild<QPushButton *>("captureFolder") && captureFiles().isEmpty(),
-            "capture folder control exists; no capture before a result");
+    require(!dock->findChild<QPushButton *>("captureFolder") && captureFiles().isEmpty(),
+            "capture folder button removed; no capture before a result");
     QImage blank(1920, 1080, QImage::Format_ARGB32);
     blank.fill(Qt::black);
     auto pump = [&](const QImage &im, int milliseconds) {
@@ -169,7 +173,7 @@ int main(int argc, char **argv) {
     while (captureFiles().isEmpty() && wait.elapsed() < 30000)
       pump(image, 50);
     const auto firstCaptureMs = wait.elapsed();
-    require(captureFiles().size() == 1 && table->isVisible(),
+    require(captureFiles().size() == 1 && preview->isEditing(),
             "one exact result is saved before assistance or confirmation");
     QFile firstMetadata(captures.filePath(captureFiles().first()));
     require(firstMetadata.open(QIODevice::ReadOnly), "saved frame metadata");
@@ -187,24 +191,18 @@ int main(int argc, char **argv) {
       QPainter painter(&laterImage);
       painter.fillRect(QRect(10, 160, 100, 100), QColor(255, 0, 255));
     }
-    while (!table->isVisible() && wait.elapsed() < 30000)
+    while (!preview->isEditing() && wait.elapsed() < 30000)
       pump(laterImage, 50);
     const auto firstMs = wait.elapsed();
     std::cout << "First local status=" << state->text().toStdString() << "\n";
-    require(table->isVisible(), "first result opens calibration review immediately");
-    const auto *untrained = qobject_cast<QComboBox *>(table->cellWidget(0, 2));
-    require(untrained && untrained->currentData().toString().isEmpty(),
-            "unregistered templates never guess tags");
-    auto *assist = dock->findChild<QPushButton *>("jevAssist");
-    require(assist && assist->isEnabled(), "optional Jev assistance during calibration");
+    require(preview->isEditing(), "first result opens calibration review immediately");
+    require(preview->rowTag(0).isEmpty(), "unregistered templates never guess tags");
+    auto *assist = dock->findChild<QPushButton *>("retryRead");
+    require(assist && assist->isEnabled(), "retry read button available during calibration");
     wait.restart();
     if (manualLabels) {
-      for (int row = 0; row < 12; ++row) {
-        auto *box = qobject_cast<QComboBox *>(table->cellWidget(row, 2));
-        const auto choice = box->findData(expected[row]);
-        require(choice > 0, "manual tag choice available");
-        box->setCurrentIndex(choice);
-      }
+      for (int row = 0; row < 12; ++row)
+        preview->setRowTag(row, expected[row]);
       pump(laterImage, 100);
     } else {
       assist->click();
@@ -219,12 +217,9 @@ int main(int argc, char **argv) {
             "saved frame is unchanged when the live scene changes during inference");
     auto checkRows = [&] {
       for (int row = 0; row < 12; ++row) {
-        const auto *box = qobject_cast<QComboBox *>(table->cellWidget(row, 2));
-        if (!box || box->currentData().toString() != expected[row])
-          std::cout << "Rank " << row + 1
-                    << " actual=" << (box ? box->currentText().toStdString() : "missing") << "\n";
-        require(box && box->currentData().toString() == expected[row],
-                "all twelve real 2v2 initials");
+        if (preview->rowTag(row) != expected[row])
+          std::cout << "Rank " << row + 1 << " actual=" << preview->rowTag(row).toStdString() << "\n";
+        require(preview->rowTag(row) == expected[row], "all twelve real 2v2 initials");
       }
     };
     checkRows();
@@ -258,29 +253,20 @@ int main(int argc, char **argv) {
     session.close();
     require(audit.size() == 1 && audit[0].toObject()["capture"].toObject() == firstCapture,
             "committed race links to the exact frozen frame");
-    auto *token = dock->findChild<QLineEdit *>("discordToken");
-    token->setText("offline-bot-token");
-    dock->findChild<QLineEdit *>("discordChannel")->setText("987654321012345678");
-    dock->findChild<QPushButton *>("discordSave")->click();
-    require(token->text().isEmpty() && discordApi.count == 0, "saving bot settings does not send");
-    auto *send = dock->findChild<QPushButton *>("discordSend");
-    require(send->isEnabled(), "send enabled after score");
-    send->click();
-    send->click();
+    postDiscord->click();
     pump(image, 500);
-    require(discordApi.count == 1, "manual Discord double click sends once");
+    require(discordApi.count == 1, "postDiscord sends current Lounge score once");
     const auto sent =
         QJsonDocument::fromJson(discordApi.request.mid(discordApi.request.indexOf("\r\n\r\n") + 4))
             .object();
-    require(sent["content"].toString() == expectedLine &&
-                sent["allowed_mentions"].toObject()["parse"].toArray().isEmpty(),
-            "Discord preserves score format and disables mentions");
+    require(sent["score_line"].toString() == expectedLine && sent["post_to_discord"].toBool(),
+            "Discord bot payload preserves score format and post_to_discord flag");
     pump(blank, 4000);
     wait.restart();
-    while (!table->isVisible() && wait.elapsed() < 30000)
+    while (!preview->isEditing() && wait.elapsed() < 30000)
       pump(image, 50);
     const auto warmMs = wait.elapsed();
-    require(table->isVisible(), "CPU template recognition on the next race");
+    require(preview->isEditing(), "CPU template recognition on the next race");
     checkRows();
     require(captureFiles().size() == 2, "next race produces a new image pair");
     dock->findChild<QPushButton *>("cancel")->click();
@@ -291,18 +277,15 @@ int main(int argc, char **argv) {
     wait.restart();
     while (captureFiles().size() < 3 && wait.elapsed() < 30000)
       pump(image, 50);
-    require(captureFiles().size() == 3 && table->isVisible(), "result saved before stopping");
+    require(captureFiles().size() == 3 && preview->isEditing(), "result saved before stopping");
     assist->click();
     pump(image, 100);
-    start->click();
+    stop->click();
     pump(image, 2800);
-    require(scores->text() == expectedLine && !table->isVisible(),
+    require(scores->text() == expectedLine && !preview->isEditing(),
             "stop discards any late local answer");
     require(captureFiles().size() == 3, "stopping inference preserves the result frame");
 
-    auto *automatic = dock->findChild<QCheckBox *>("autoCommit");
-    require(automatic && automatic->isEnabled(), "automatic setting available while stopped");
-    automatic->setChecked(true);
     if (!manualLabels)
       require(QFile::rename(config.path() + "/local-runtime.json",
                             config.path() + "/local-runtime.json.disabled"),
@@ -311,7 +294,7 @@ int main(int argc, char **argv) {
     wait.restart();
     while (state->text().contains(QStringLiteral("読み込み")) && wait.elapsed() < 120000)
       pump(blank, 100);
-    require(start->text() == QStringLiteral("集計停止"), "automatic mode works without a model");
+    require(!start->isEnabled() && stop->isEnabled(), "automatic mode works without a model");
     pump(blank, 3500);
     const auto automaticLine = manualLabels
                                    ? QStringLiteral("【d】50／T 28 (+22)／A 28 (+22)／F 24 "
@@ -322,17 +305,15 @@ int main(int argc, char **argv) {
     while (scores->text() != automaticLine && wait.elapsed() < 30000)
       pump(image, 50);
     const auto automaticMs = wait.elapsed();
-    if (scores->text() != automaticLine || table->isVisible()) {
+    if (scores->text() != automaticLine || preview->isEditing()) {
       std::cerr << "Automatic status=" << state->text().toStdString()
                 << " score=" << scores->text().toStdString() << '\n';
-      if (table->isVisible())
-        for (int row = 0; row < 12; ++row) {
-          const auto *box = qobject_cast<QComboBox *>(table->cellWidget(row, 2));
+      if (preview->isEditing())
+        for (int row = 0; row < 12; ++row)
           std::cerr << "Automatic rank " << row + 1 << "="
-                    << (box ? box->currentData().toString().toStdString() : "missing") << '\n';
-        }
+                    << preview->rowTag(row).toStdString() << '\n';
     }
-    require(scores->text() == automaticLine && !table->isVisible(),
+    require(scores->text() == automaticLine && !preview->isEditing(),
             "valid twelve rows automatically commit exactly one race");
     pump(image, 1000);
     require(scores->text() == automaticLine, "automatic mode duplicate guard");
@@ -344,16 +325,14 @@ int main(int argc, char **argv) {
         occluded.setPixel(x, y, qRgb(0, 0, 0));
     pump(blank, 4000);
     wait.restart();
-    while (!table->isVisible() && wait.elapsed() < 30000)
+    while (!preview->isEditing() && wait.elapsed() < 30000)
       pump(occluded, 50);
-    require(table->isVisible(), "unknown initial opens manual review in automatic mode");
-    const auto *unknown = qobject_cast<QComboBox *>(table->cellWidget(0, 2));
-    require(unknown && unknown->currentData().toString().isEmpty() &&
-                scores->text() == automaticLine,
+    require(preview->isEditing(), "unknown initial opens manual review in automatic mode");
+    require(preview->rowTag(0).isEmpty() && scores->text() == automaticLine,
             "automatic mode never fills unknown rows or changes the score");
     require(captureFiles().size() == 5, "unreadable result is retained for accuracy review");
     dock->findChild<QPushButton *>("cancel")->click();
-    start->click();
+    stop->click();
 
     const auto evidenceDirectory = args[6] + ".captures";
     require(QDir().mkpath(evidenceDirectory), "capture evidence folder");

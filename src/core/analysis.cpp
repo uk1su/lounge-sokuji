@@ -592,12 +592,20 @@ Analysis Analyzer::read(const QImage &source, const std::vector<std::string> &ta
         "元ゲーム映像が16:9ではありません。クロップ前の映像ソースを選択してください。");
     return out;
   }
-  out.image = source.scaled(1920, 1080, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
-                  .convertToFormat(QImage::Format_ARGB32);
+  if (source.width() == 1920 && source.height() == 1080) {
+    out.image = source.format() == QImage::Format_ARGB32
+                    ? source
+                    : source.convertToFormat(QImage::Format_ARGB32);
+  } else {
+    out.image = source
+                    .scaled(1920, 1080, Qt::IgnoreAspectRatio,
+                            layoutOnly ? Qt::FastTransformation : Qt::SmoothTransformation)
+                    .convertToFormat(QImage::Format_ARGB32);
+  }
   mk::Image image(1920, 1080);
   std::copy(out.image.constBits(), out.image.constBits() + image.pixels.size(),
             image.pixels.begin());
-  out.layout = reference_.read(image);
+  out.layout = layoutOnly ? reference_.readLayoutOnly(image) : reference_.read(image);
   if (layoutOnly) {
     // A finish banner can dim the bottom rank without hiding its digits. Normalize
     // contrast per scanline, and require the visible 12 glyph to beat every other
@@ -611,6 +619,22 @@ Analysis Analyzer::read(const QImage &source, const std::vector<std::string> &ta
         ++out.layout.anchors;
       }
     }
+    if (out.layout.anchors >= 11 && out.layout.pluses >= 9)
+      out.finished_in_twelfth = hasTwelfthFinishNotice(out.image);
+    if (out.layout.pluses <= 2 && out.layout.anchors >= 8 && out.layout.anchors < 12) {
+      // Sorted cumulative standings (2R+) repeat rank badges on ties (e.g. 1,1,3 or 9,9,11).
+      for (int row = 1; row < 12; ++row) {
+        if (out.layout.anchor[size_t(row)] >= .65)
+          continue;
+        double score = 0;
+        if (reference_.visibleTiedRank(image, row, &score)) {
+          out.layout.anchor[size_t(row)] = score;
+          ++out.layout.anchors;
+        }
+      }
+    }
+    if (out.layout.anchors == 12 && out.layout.pluses <= 2)
+      out.cumulativeScores = readCumulativeScores(out.image);
     // Layout-only recognition never invokes OCR or fills rows from team capacity.
     for (int row = 0; row < 12; ++row) {
       out.standings.push_back({row + 1, {}, 0});
@@ -669,13 +693,7 @@ Analysis Analyzer::read(const QImage &source, const std::vector<std::string> &ta
   }
 
   if (out.finished_in_twelfth && !tags.empty()) {
-    const std::string myTag = tags[0];
-    out.standings[11].tag = myTag;
-    out.standings[11].confidence = 1.0;
-    out.evidence[11].closestTag = myTag;
-    out.evidence[11].closestScore = 1.0;
-    out.evidence[11].similarity = 1.0;
-    out.evidence[11].method = QStringLiteral("自チーム12位確定通知");
+    enforceTwelfthFinishNotice(out, tags);
   }
 
   return out;
@@ -721,12 +739,12 @@ bool loadSamples(const QString &path, std::vector<TagSample> &samples, QString &
     const auto obj = v.toObject();
     const auto tag = obj.value("tag").toString();
     const auto data = QByteArray::fromBase64(obj.value("png").toString().toLatin1());
-    if (data.size() > 100000) {
+    if (data.size() > 150000) {
       error = QStringLiteral("タグ画像が大きすぎます");
       return false;
     }
     const auto patch = QImage::fromData(data, "PNG");
-    if (tag.isEmpty() || tag.size() > 64 || patch.width() < 8 || patch.width() > 240 ||
+    if (tag.isEmpty() || tag.size() > 64 || patch.width() < 8 || patch.width() > 400 ||
         patch.height() < 12 || patch.height() > 48 || loaded.size() >= 144) {
       error = QStringLiteral("タグ画像の形式が不正です");
       return false;
@@ -735,6 +753,153 @@ bool loadSamples(const QString &path, std::vector<TagSample> &samples, QString &
   }
   samples = std::move(loaded);
   return true;
+}
+
+namespace {
+std::vector<float> computeNameEdges(const QImage &gray, int w, int h) {
+  std::vector<float> edges(size_t((w - 1) * (h - 1)), 0.0f);
+  for (int y = 0; y < h - 1; ++y) {
+    const uint8_t *r0 = gray.constScanLine(y);
+    const uint8_t *r1 = gray.constScanLine(y + 1);
+    float *out = edges.data() + size_t(y * (w - 1));
+    for (int x = 0; x < w - 1; ++x) {
+      const float gx = std::abs(int(r0[x + 1]) - int(r0[x]));
+      const float gy = std::abs(int(r1[x]) - int(r0[x]));
+      out[x] = std::max(0.0f, (gx + gy) - 20.0f);
+    }
+  }
+  return edges;
+}
+} // namespace
+
+QImage extractPlayerNamePatch(const QImage &frame1920, int row) {
+  if (frame1920.isNull() || row < 0 || row >= 12)
+    return {};
+  const QImage norm = (frame1920.size() == QSize(1920, 1080)
+                           ? frame1920
+                           : frame1920.scaled(1920, 1080, Qt::IgnoreAspectRatio,
+                                              Qt::SmoothTransformation))
+                          .convertToFormat(QImage::Format_Grayscale8);
+  return norm.copy(1005 + 13, 112 + 78 * row - 27 + 6, 320, 42);
+}
+
+double matchPlayerNameEdge(const QImage &frame1920, int row, const QImage &namePatch) {
+  if (frame1920.isNull() || namePatch.isNull() || row < 0 || row >= 12)
+    return 0.0;
+  const QImage curPatch = extractPlayerNamePatch(frame1920, row);
+  const QImage refGray = (namePatch.format() == QImage::Format_Grayscale8)
+                             ? namePatch
+                             : namePatch.convertToFormat(QImage::Format_Grayscale8);
+  if (curPatch.size() != refGray.size() || curPatch.width() < 20 || curPatch.height() < 12)
+    return 0.0;
+
+  const int ew = curPatch.width() - 1;
+  const int eh = curPatch.height() - 1;
+  const auto curEdges = computeNameEdges(curPatch, curPatch.width(), curPatch.height());
+  const auto refEdges = computeNameEdges(refGray, refGray.width(), refGray.height());
+
+  constexpr int kPadX = 4;
+  constexpr int kPadY = 2;
+  const int cw = ew - 2 * kPadX;
+  const int ch = eh - 2 * kPadY;
+  const int n = cw * ch;
+
+  double rSum = 0.0, rSq = 0.0;
+  for (int y = 0; y < ch; ++y) {
+    const float *rp = refEdges.data() + size_t((y + kPadY) * ew + kPadX);
+    for (int x = 0; x < cw; ++x) {
+      rSum += rp[x];
+      rSq += double(rp[x]) * rp[x];
+    }
+  }
+  const double rMean = rSum / n;
+  const double rVar = rSq - rSum * rMean;
+  if (rVar < 1e4)
+    return 0.0;
+  const double rNorm = std::sqrt(rVar);
+
+  double best = 0.0;
+  for (int dy = -kPadY; dy <= kPadY; ++dy) {
+    for (int dx = -kPadX; dx <= kPadX; ++dx) {
+      double cSum = 0.0, cSq = 0.0, rawDot = 0.0;
+      for (int y = 0; y < ch; ++y) {
+        const float *cp = curEdges.data() + size_t((y + kPadY + dy) * ew + (kPadX + dx));
+        const float *rp = refEdges.data() + size_t((y + kPadY) * ew + kPadX);
+        for (int x = 0; x < cw; ++x) {
+          cSum += cp[x];
+          cSq += double(cp[x]) * cp[x];
+          rawDot += double(cp[x]) * rp[x];
+        }
+      }
+      const double cMean = cSum / n;
+      const double cVar = cSq - cSum * cMean;
+      if (cVar < 1e4)
+        continue;
+      const double corr = (rawDot - cSum * rMean) / (std::sqrt(cVar) * rNorm);
+      best = std::max(best, corr);
+    }
+  }
+  return best;
+}
+
+void applyPlayerOverrides(Analysis &analysis, const std::vector<TagSample> &overrides,
+                          const std::vector<std::string> &activeTags) {
+  if (overrides.empty() || analysis.image.isNull() || analysis.standings.size() != 12)
+    return;
+  if (analysis.evidence.size() != 12)
+    analysis.evidence.resize(12);
+
+  const bool hadTaggedRow = std::any_of(
+      analysis.standings.begin(), analysis.standings.end(),
+      [](const Standing &s) { return !s.tag.empty(); });
+
+  struct MatchCandidate {
+    double score;
+    int row;
+    std::string tag;
+  };
+  std::vector<MatchCandidate> candidates;
+  for (const auto &ov : overrides) {
+    if (std::find(activeTags.begin(), activeTags.end(), ov.tag) == activeTags.end())
+      continue;
+    int bestRow = -1;
+    double best = 0.0, second = 0.0;
+    for (int row = 0; row < 12; ++row) {
+      const double s = matchPlayerNameEdge(analysis.image, row, ov.patch);
+      if (s > best) {
+        second = best;
+        best = s;
+        bestRow = row;
+      } else if (s > second) {
+        second = s;
+      }
+    }
+    if (bestRow >= 0 && best >= 0.80 && (best - second) >= 0.08)
+      candidates.push_back({best, bestRow, ov.tag});
+  }
+
+  std::sort(candidates.begin(), candidates.end(),
+            [](const MatchCandidate &a, const MatchCandidate &b) { return a.score > b.score; });
+
+  std::array<bool, 12> assigned{};
+  for (const auto &c : candidates) {
+    if (analysis.finished_in_twelfth && c.row == 11)
+      continue;
+    if (assigned[size_t(c.row)])
+      continue;
+    assigned[size_t(c.row)] = true;
+    analysis.standings[size_t(c.row)].tag = c.tag;
+    analysis.standings[size_t(c.row)].confidence = std::max(analysis.standings[size_t(c.row)].confidence, c.score);
+    analysis.evidence[size_t(c.row)].closestTag = c.tag;
+    analysis.evidence[size_t(c.row)].closestScore = c.score;
+    analysis.evidence[size_t(c.row)].similarity = c.score;
+    analysis.evidence[size_t(c.row)].method = QStringLiteral("手動学習補完");
+  }
+
+  if (hadTaggedRow && std::all_of(analysis.standings.begin(), analysis.standings.end(),
+                                  [](const Standing &s) { return !s.tag.empty(); })) {
+    analysis.error.clear();
+  }
 }
 
 QString formatScoreLine(const std::vector<std::string> &tags,
@@ -798,5 +963,68 @@ QString formatScoreLine(const std::vector<std::string> &tags,
   parts << QString("＠%1").arg(remaining);
 
   return parts.join(QStringLiteral("／"));
+}
+
+bool resolveSingleDeficitRow(Analysis &analysis, const std::vector<std::string> &tags,
+                             int playersPerTeam) {
+  if (analysis.standings.size() != 12 || tags.empty() || playersPerTeam <= 0 ||
+      int(tags.size()) * playersPerTeam != 12) {
+    return false;
+  }
+  const std::set<std::string> allowed(tags.begin(), tags.end());
+  std::map<std::string, int> counts;
+  for (const auto &t : tags)
+    counts[t] = 0;
+
+  std::vector<size_t> unresolved;
+  for (size_t r = 0; r < 12; ++r) {
+    const auto &s = analysis.standings[r];
+    if (!s.tag.empty() && allowed.count(s.tag) && s.confidence >= 0.70) {
+      ++counts[s.tag];
+    } else {
+      unresolved.push_back(r);
+    }
+  }
+  if (unresolved.size() != 1)
+    return false;
+
+  std::string deficitTag;
+  for (const auto &t : tags) {
+    if (counts[t] == playersPerTeam)
+      continue;
+    if (counts[t] == playersPerTeam - 1 && deficitTag.empty()) {
+      deficitTag = t;
+    } else {
+      return false;
+    }
+  }
+  if (deficitTag.empty())
+    return false;
+
+  const size_t u = unresolved[0];
+  if (analysis.evidence.size() != 12)
+    analysis.evidence.resize(12);
+  analysis.standings[u].rank = int(u + 1);
+  analysis.standings[u].tag = deficitTag;
+  analysis.standings[u].confidence = 0.95;
+  analysis.evidence[u].closestTag = deficitTag;
+  analysis.evidence[u].closestScore = 0.95;
+  analysis.evidence[u].similarity = 0.95;
+  analysis.evidence[u].method = QStringLiteral("欠員・CPU自動補完");
+  analysis.error.clear();
+  return true;
+}
+
+void enforceTwelfthFinishNotice(Analysis &analysis, const std::vector<std::string> &tags) {
+  if (!analysis.finished_in_twelfth || tags.empty() || analysis.standings.size() != 12)
+    return;
+  const std::string &myTag = tags[0];
+  analysis.standings[11] = {12, myTag, 1.0};
+  if (analysis.evidence.size() != 12)
+    analysis.evidence.resize(12);
+  analysis.evidence[11].closestTag = myTag;
+  analysis.evidence[11].closestScore = 1.0;
+  analysis.evidence[11].similarity = 1.0;
+  analysis.evidence[11].method = QStringLiteral("自チーム12位確定通知");
 }
 } // namespace quickscore

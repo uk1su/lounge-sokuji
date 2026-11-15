@@ -26,3 +26,4 @@ score.txt
 /dist/
 /CMakeFiles/
 /CMakeCache.txt
+/cmake/local-secrets.cmake

@@ -49,7 +49,7 @@ void FrameCapture::onTick(float seconds) {
   elapsed_ += seconds;
   bool needsGraphics = stage_ != Stage::Wait;
   if (stage_ == Stage::Wait) {
-    needsGraphics = elapsed_ >= 0.125f;
+    needsGraphics = elapsed_ >= 0.100f;
   }
   if (!needsGraphics)
     return;

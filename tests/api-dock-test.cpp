@@ -1,3 +1,4 @@
+#include "credential-store.hpp"
 #include "main-dock.hpp"
 #include "mock-http.hpp"
 #include "result-capture.hpp"
@@ -12,11 +13,12 @@
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <QPainter>
 #include <QPalette>
 #include <QPushButton>
 #include <QSettings>
-#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QThread>
 #include <iostream>
@@ -87,9 +89,8 @@ int main(int argc, char **argv) {
             "real runtime configuration");
     {
       QSettings settings(config.path() + "/settings.ini", QSettings::IniFormat);
-      settings.setValue("schema", 8);
+      settings.setValue("schema", 11);
       settings.setValue("sourceKey", "Game fixture");
-      settings.setValue("format", 0);
       settings.setValue("tags", teamTags.join(", "));
     }
     QPalette palette;
@@ -102,6 +103,7 @@ int main(int argc, char **argv) {
     app.setPalette(palette);
     app.setStyle("Fusion");
     MockServer discordApi, jevApi;
+    discordApi.body = "{\"ok\":true,\"posted\":true}";
     QJsonObject answers;
     const int choices[]{0, 1, 2, 3, 4, 3, 5, 1, 2, 5, 0, 4};
     for (int r = 0; r < 12; ++r) {
@@ -115,10 +117,27 @@ int main(int argc, char **argv) {
                                  {"confidence", .99},
                                  {"probabilities", probabilities}});
     }
-    jevApi.body = QJsonDocument(QJsonObject{{"model", "jev-1.14.0"},
-                                            {"answers", answers},
-                                            {"usage", QJsonObject{{"input_tokens", 1200}}}})
-                      .toJson();
+    const QByteArray normalBody = QJsonDocument(QJsonObject{{"model", "jev-1.14.0"},
+                                                            {"answers", answers},
+                                                            {"usage", QJsonObject{{"input_tokens", 1200}}}})
+                                      .toJson();
+    QJsonObject unknownAnswers = answers;
+    {
+      QJsonObject probs;
+      for (int i = 0; i < 6; ++i)
+        probs.insert(QString("team%1").arg(i), 0.02 / 6);
+      probs.insert("unknown", 0.98);
+      unknownAnswers.insert("rank1", QJsonObject{{"type", "choice"},
+                                                 {"choice", "unknown"},
+                                                 {"confidence", .98},
+                                                 {"probabilities", probs}});
+    }
+    const QByteArray unknownRow0Body =
+        QJsonDocument(QJsonObject{{"model", "jev-1.14.0"},
+                                  {"answers", unknownAnswers},
+                                  {"usage", QJsonObject{{"input_tokens", 1200}}}})
+            .toJson();
+    jevApi.body = normalBody;
     QString credentialError;
     QString token = "mock-api-key";
     if (live) {
@@ -133,22 +152,55 @@ int main(int argc, char **argv) {
     auto dock = std::make_unique<quickscore::MainDock>(config.path(), nullptr, discordApi.url(),
                                                        live ? QUrl{} : jevApi.url());
     dock->setAttribute(Qt::WA_DontShowOnScreen);
-    dock->resize(760, 1200);
+    dock->resize(280, 560);
     dock->show();
+    std::cout << "COMPACT minHint=" << dock->minimumSizeHint().width() << "x"
+              << dock->minimumSizeHint().height() << " hint=" << dock->sizeHint().width() << "x"
+              << dock->sizeHint().height() << "\n";
+    require(dock->minimumSizeHint().width() <= 260, "compact horizontal dock minimum width");
     auto *start = dock->findChild<QPushButton *>("start");
+    auto *stop = dock->findChild<QPushButton *>("stop");
+    auto *reset = dock->findChild<QPushButton *>("reset");
     auto *scores = dock->findChild<QLabel *>("scores");
     auto *state = dock->findChild<QLabel *>("status");
-    auto *table = dock->findChild<QTableWidget *>("correction");
-    require(start && scores && state && table, "native widgets");
+    auto *preview = dock->findChild<quickscore::ResultPreviewWidget *>("preview");
+    auto *postDiscord = dock->findChild<QCheckBox *>("postDiscord");
+    auto *raceHistory = dock->findChild<QComboBox *>("raceHistory");
+    auto *editRace = dock->findChild<QPushButton *>("editRace");
+    require(start && stop && reset && scores && state && preview && postDiscord && raceHistory &&
+                editRace,
+            "native widgets");
+    require(start->isEnabled() && !stop->isEnabled(), "start/stop initial enabled state");
+    require(!dock->findChild<QWidget *>("correction"), "duplicate 12-row bottom table removed");
+    require(!dock->findChild<QWidget *>("format"), "format selector removed (auto from tag count)");
+    auto *detectedFormat = dock->findChild<QLabel *>("detectedFormat");
+    require(detectedFormat && detectedFormat->text() == QStringLiteral("2v2"),
+            "6 tags automatically detected as 2v2");
+    require(!editRace->isEnabled(), "cannot edit before any race is recorded");
     require(!dock->findChild<QComboBox *>("recognitionMode") &&
-                !dock->findChild<QLineEdit *>("geminiKey"),
-            "Jev-only UI without cloud API fields");
-    require(!dock->findChild<QCheckBox *>("autoCommit")->isChecked(),
-            "default manual confirmation");
+                !dock->findChild<QLineEdit *>("geminiKey") &&
+                !dock->findChild<QCheckBox *>("autoCommit") &&
+                !dock->findChild<QCheckBox *>("jevApiEnabled") &&
+                !dock->findChild<QLineEdit *>("jevApiKey") &&
+                !dock->findChild<QPushButton *>("saveJevApiKey") &&
+                !dock->findChild<QPushButton *>("clearFast") &&
+                !dock->findChild<QPushButton *>("jevAssist") &&
+                !dock->findChild<QLineEdit *>("discordToken") &&
+                !dock->findChild<QLineEdit *>("discordChannel") &&
+                !dock->findChild<QPushButton *>("discordSave") &&
+                !dock->findChild<QPushButton *>("discordDelete") &&
+                !dock->findChild<QPushButton *>("discordSend") &&
+                !dock->findChild<QPushButton *>("undo") &&
+                !dock->findChild<QPushButton *>("manual") &&
+                !dock->findChild<QPushButton *>("captureFolder") &&
+                !dock->findChild<QPushButton *>("diagnose") &&
+                !dock->findChild<QLabel *>("captureStatus") &&
+                !dock->findChild<QLabel *>("dockTitle"),
+            "streamlined Lounge UI without removed settings controls");
+    require(!postDiscord->isChecked(), "Discord auto-post defaults to unchecked");
     const QDir captures(config.path() + "/captures");
     auto captureFiles = [&] { return captures.entryList({"*.json"}, QDir::Files, QDir::Name); };
-    require(dock->findChild<QPushButton *>("captureFolder") && captureFiles().isEmpty(),
-            "capture folder control exists; no capture before a result");
+    require(captureFiles().isEmpty(), "no capture before a result");
     QImage blank(1920, 1080, QImage::Format_ARGB32);
     blank.fill(Qt::black);
     auto pump = [&](const QImage &im, int milliseconds) {
@@ -171,21 +223,20 @@ int main(int argc, char **argv) {
     };
     start->click();
     pump(blank, 3500);
-    QElapsedTimer elapsed;
-    elapsed.start();
-    while (!table->isVisible() && elapsed.elapsed() < 10000)
-      pump(image, 50);
-    require(table->isVisible() && (live || jevApi.count == 1), "OBS to one API request to review");
-    require(scores->text().contains(QStringLiteral("＠12")), "manual default");
-    for (int row = 0; row < 12; ++row)
-      require(qobject_cast<QComboBox *>(table->cellWidget(row, 2))->currentData().toString() ==
-                  expected[row],
-              "twelve API rows");
-    dock->findChild<QPushButton *>("confirm")->click();
     const auto firstLine = QStringLiteral(
         "【M】17／う 17 (±0)／L 16 (+1)／A 14 (+3)／B 9 (+8)／R 9 (+8)／現在1位／＠11");
-    require(scores->text() == firstLine, "score format");
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (scores->text() != firstLine && !preview->isEditing() && elapsed.elapsed() < 15000)
+      pump(image, 50);
     if (live) {
+      if (preview->isEditing()) {
+        for (int row = 0; row < 12; ++row)
+          require(preview->rowTag(row) == expected[row], "twelve API rows");
+        dock->findChild<QPushButton *>("confirm")->click();
+      }
+      require(scores->text() == firstLine && discordApi.count == 0,
+              "live score format without Discord when unchecked");
       QFile report(args[6] + ".json");
       require(report.open(QIODevice::WriteOnly), "live report");
       report.write(QJsonDocument(QJsonObject{{"real_obs_capture", true},
@@ -203,6 +254,17 @@ int main(int argc, char **argv) {
       std::cout << "PASS real OBS frame to live Jev API to correct score\n";
       return 0;
     }
+    if (!(scores->text() == firstLine && !preview->isEditing() && jevApi.count == 1 &&
+          discordApi.count == 0)) {
+      std::cerr << "DIAG status=" << state->text().toStdString()
+                << " diag=" << dock->findChild<QLabel *>("diagnostic")->text().toStdString()
+                << " scores=" << scores->text().toStdString()
+                << " editing=" << preview->isEditing() << " jevCount=" << jevApi.count
+                << " discordCount=" << discordApi.count << " elapsed=" << elapsed.elapsed() << '\n';
+    }
+    require(scores->text() == firstLine && !preview->isEditing() && jevApi.count == 1 &&
+                discordApi.count == 0,
+            "OBS to one API request auto-commits without Discord when unchecked");
     pump(image, 1000);
     require(jevApi.count == 1, "duplicate guard");
     pump(blank, 3500);
@@ -210,30 +272,145 @@ int main(int argc, char **argv) {
     elapsed.restart();
     while (jevApi.count < 2 && elapsed.elapsed() < 10000)
       pump(image, 50);
-    start->click();
+    stop->click();
     pump(image, 1200);
-    require(scores->text() == firstLine && !table->isVisible(), "stop cancels late API result");
+    require(scores->text() == firstLine && !preview->isEditing(), "stop cancels late API result");
     jevApi.delay = 0;
-    dock->findChild<QCheckBox *>("autoCommit")->setChecked(true);
+    postDiscord->click();
+    elapsed.restart();
+    while (discordApi.count < 1 && elapsed.elapsed() < 5000)
+      pump(blank, 50);
+    require(discordApi.count == 1, "checking postDiscord posts current score to discord_bot");
+    const auto firstDiscordJson =
+        QJsonDocument::fromJson(discordApi.request.mid(discordApi.request.indexOf("\r\n\r\n") + 4))
+            .object();
+    require(firstDiscordJson["score_line"].toString() == firstLine &&
+                firstDiscordJson["post_to_discord"].toBool() &&
+                !firstDiscordJson["active"].toBool() &&
+                firstDiscordJson["channel_id"].toString() == QStringLiteral("1571454531814952971"),
+            "discord_bot payload contains score_line, post_to_discord, active, and lounge channel_id");
     start->click();
+    elapsed.restart();
+    while (discordApi.count < 2 && elapsed.elapsed() < 5000)
+      pump(blank, 50);
+    require(discordApi.count == 2, "start sends overlay active=true without posting to Discord");
+    const auto startDiscordJson =
+        QJsonDocument::fromJson(discordApi.request.mid(discordApi.request.indexOf("\r\n\r\n") + 4))
+            .object();
+    require(startDiscordJson["active"].toBool() && !startDiscordJson["post_to_discord"].toBool(),
+            "start payload activates overlay with post_to_discord=false");
     pump(blank, 3500);
     elapsed.restart();
     const auto secondLine = QStringLiteral(
         "【M】34／う 34 (±0)／L 32 (+2)／A 28 (+6)／B 18 (+16)／R 18 (+16)／現在1位／＠10");
-    while (scores->text() != secondLine && elapsed.elapsed() < 10000)
+    while ((scores->text() != secondLine || discordApi.count < 3) && elapsed.elapsed() < 10000)
       pump(image, 50);
-    require(scores->text() == secondLine && jevApi.count == 3, "validated API auto commit");
+    require(scores->text() == secondLine && jevApi.count == 3 && discordApi.count == 3,
+            "validated API auto-commits and auto-posts to Discord");
     const auto automaticMs = elapsed.elapsed();
+
+    pump(blank, 3500);
+    jevApi.body = unknownRow0Body;
+    elapsed.restart();
+    while (!preview->isEditing() && elapsed.elapsed() < 10000)
+      pump(image, 50);
+    require(preview->isEditing() && preview->rowTag(0).isEmpty() && jevApi.count == 4 &&
+                discordApi.count == 3,
+            "unknown player opens clickable badge review without posting to Discord");
+    preview->setRowTag(0, QStringLiteral("M"));
+    dock->findChild<QPushButton *>("confirm")->click();
+    const auto thirdLine = QStringLiteral(
+        "【M】51／う 51 (±0)／L 48 (+3)／A 42 (+9)／B 27 (+24)／R 27 (+24)／現在1位／＠9");
+    elapsed.restart();
+    while ((scores->text() != thirdLine || discordApi.count < 4) && elapsed.elapsed() < 5000)
+      pump(blank, 50);
+    require(scores->text() == thirdLine && !preview->isEditing() && discordApi.count == 4,
+            "confirming manually assigned player updates score and persists override");
+
+    pump(blank, 3500);
+    elapsed.restart();
+    const auto fourthLine = QStringLiteral(
+        "【M】68／う 68 (±0)／L 64 (+4)／A 56 (+12)／B 36 (+32)／R 36 (+32)／現在1位／＠8");
+    while ((scores->text() != fourthLine || discordApi.count < 5) && elapsed.elapsed() < 10000)
+      pump(image, 50);
+    require(scores->text() == fourthLine && !preview->isEditing() && jevApi.count == 5 &&
+                discordApi.count == 5,
+            "subsequent race with Jev unknown auto-commits via learned player override");
+
+    jevApi.body = normalBody;
     pump(blank, 3500);
     jevApi.status = 429;
     elapsed.restart();
-    while (!table->isVisible() && elapsed.elapsed() < 10000)
+    while (!preview->isEditing() && elapsed.elapsed() < 10000)
       pump(image, 50);
-    require(table->isVisible() && scores->text() == secondLine && jevApi.count == 4, "429 held");
+    require(preview->isEditing() && scores->text() == fourthLine && jevApi.count == 6 &&
+                discordApi.count == 5,
+            "429 held without posting to Discord");
     pump(image, 1000);
-    require(jevApi.count == 4, "no automatic retries");
+    require(jevApi.count == 6, "no automatic retries");
     require(dock->grab().save(args[6]), "API UI preview");
-    require(QDir(config.path() + "/captures").entryList({"*.json"}, QDir::Files).size() == 4,
+    dock->findChild<QPushButton *>("cancel")->click();
+    stop->click();
+    elapsed.restart();
+    while (discordApi.count < 6 && elapsed.elapsed() < 5000)
+      pump(blank, 50);
+    require(discordApi.count == 6, "manual stop syncs inactive overlay state");
+    const auto stopDiscordJson =
+        QJsonDocument::fromJson(discordApi.request.mid(discordApi.request.indexOf("\r\n\r\n") + 4))
+            .object();
+    require(!stopDiscordJson["active"].toBool() && !stopDiscordJson["post_to_discord"].toBool(),
+            "stop payload deactivates overlay with post_to_discord=false");
+    require(raceHistory->count() == 4 && editRace->isEnabled(), "four races in history");
+    raceHistory->setCurrentIndex(0);
+    editRace->click();
+    require(preview->isEditing() && preview->hasPreview() && preview->hasTagStrip(),
+            "editRace opens clickable right-side tag editor for 1R");
+    require(dock->grab().save(args[6] + ".edit.png"), "edit UI preview with right-side tags");
+    preview->setRowTag(0, QStringLiteral("う"));
+    preview->setRowTag(1, QStringLiteral("M"));
+    dock->findChild<QPushButton *>("confirm")->click();
+    const auto editedLine = QStringLiteral(
+        "う 71 (-6)／【M】65／L 64 (+1)／A 56 (+9)／B 36 (+29)／R 36 (+29)／現在2位／＠8");
+    require(scores->text() == editedLine && !preview->isEditing(),
+            "editing 1R updates total scores immediately");
+    require(raceHistory->itemText(0).contains(QStringLiteral("補正済み")),
+            "race history marks corrected race");
+    elapsed.restart();
+    while (discordApi.count < 7 && elapsed.elapsed() < 5000)
+      pump(blank, 50);
+    require(discordApi.count == 7, "editing 1R syncs corrected totals to Discord");
+    require(dock->overlayPort() > 0, "overlay HTTP server bound to localhost port");
+    require(QFile::exists(config.path() + "/overlay.html") &&
+                QFile::exists(config.path() + "/overlay-state.json") &&
+                QFile::exists(config.path() + "/overlay-state.js"),
+            "overlay html and state files written to config directory");
+    {
+      QNetworkAccessManager nam;
+      auto fetchLocal = [&](const QString &path) -> QByteArray {
+        QNetworkReply *reply = nam.get(QNetworkRequest(
+            QUrl(QString("http://127.0.0.1:%1%2").arg(dock->overlayPort()).arg(path))));
+        QElapsedTimer waitTimer;
+        waitTimer.start();
+        while (!reply->isFinished() && waitTimer.elapsed() < 3000)
+          app.processEvents(QEventLoop::AllEvents, 20);
+        require(reply->isFinished() && reply->error() == QNetworkReply::NoError,
+                "overlay HTTP fetch succeeded");
+        const QByteArray body = reply->readAll();
+        reply->deleteLater();
+        return body;
+      };
+      const QByteArray html = fetchLocal(QStringLiteral("/overlay.html"));
+      require(html.contains("respect-kusaan") && html.contains("team-num-2"),
+              "overlay HTTP serves mk8dx_sokuji overlay markup");
+      const QJsonObject stateObj =
+          QJsonDocument::fromJson(fetchLocal(QStringLiteral("/state.json"))).object();
+      require(stateObj.value("team_count").toInt() == 6 &&
+                  stateObj.value("remaining_races").toInt() == 8 &&
+                  stateObj.value("teams_sorted").toArray().at(0).toObject().value("tag").toString() ==
+                      QStringLiteral("う"),
+              "overlay /state.json reflects live dock score order");
+    }
+    require(QDir(config.path() + "/captures").entryList({"*.json"}, QDir::Files).size() == 6,
             "exact images saved");
     QFile report(args[6] + ".json");
     require(report.open(QIODevice::WriteOnly), "report");
@@ -241,10 +418,10 @@ int main(int argc, char **argv) {
                                            {"mock_api_requests", jevApi.count},
                                            {"automatic_ms", automaticMs},
                                            {"scoreLine", firstLine},
+                                           {"editedLine", editedLine},
                                            {"stop_late_reply_discarded", true},
                                            {"rate_limit_held", true}})
                      .toJson());
-    start->click();
     dock.reset();
     quickscore::saveStoredCredential(config.path(), "JevApi", {}, credentialError);
     obs_set_output_source(0, nullptr);

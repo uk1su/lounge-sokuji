@@ -15,6 +15,8 @@ public:
   bool busy() const { return !reply_.isNull(); }
   void cancel();
   void send(QString token, QString channel, QString content, Completion completion);
+  void sendLounge(QUrl endpoint, QString ingestKey, const QJsonObject &payload,
+                  Completion completion);
 
 private:
   QNetworkAccessManager manager_;

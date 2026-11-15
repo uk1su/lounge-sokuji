@@ -1,97 +1,168 @@
 #pragma once
 #include "analysis.hpp"
-#include "credential-store.hpp"
+#include "course.hpp"
 #include "discord-sender.hpp"
 #include "frame-capture.hpp"
 #include "jev-api-reader.hpp"
+#include "overlay.hpp"
+#include "overlay-server.hpp"
 #include "result-gate.hpp"
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
-#include <QProcess>
+#include <QRect>
 #include <QWidget>
+#include <array>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 class QComboBox;
 class QLineEdit;
 class QLabel;
 class QPushButton;
-class QTableWidget;
 class QCheckBox;
 namespace quickscore {
+class ResultPreviewWidget final : public QWidget {
+  Q_OBJECT
+public:
+  explicit ResultPreviewWidget(QWidget *parent = nullptr);
+
+  void setPlaceholderText(const QString &text);
+  void setPreview(const QImage &frame, const std::vector<Standing> &standings,
+                  const std::vector<std::string> &teamTags,
+                  const std::vector<RowEvidence> &evidence = {},
+                  const StandingsScoreRead &cumulative = {});
+  void setEditing(bool editing, bool cumulativeMode = false);
+  bool isEditing() const { return editing_; }
+  bool hasPreview() const { return !cropped_.isNull(); }
+  bool hasTagStrip() const { return standings_.size() == 12; }
+  void setRowTag(int row, const QString &tag);
+  QString rowTag(int row) const;
+  std::vector<Standing> standings() const { return standings_; }
+  void setOnEdited(std::function<void()> cb) { onEdited_ = std::move(cb); }
+
+  QSize sizeHint() const override;
+  QSize minimumSizeHint() const override;
+  bool hasHeightForWidth() const override { return true; }
+  int heightForWidth(int width) const override;
+
+protected:
+  void paintEvent(QPaintEvent *event) override;
+  void mouseMoveEvent(QMouseEvent *event) override;
+  void mousePressEvent(QMouseEvent *event) override;
+  void leaveEvent(QEvent *event) override;
+
+private:
+  int hitRow(const QPoint &pos) const;
+  QString tooltipForRow(int row) const;
+
+  QString placeholder_;
+  QImage cropped_;
+  std::vector<Standing> standings_;
+  std::vector<std::string> teamTags_;
+  std::vector<RowEvidence> evidence_;
+  StandingsScoreRead cumulative_;
+  bool editing_ = false;
+  bool cumulativeMode_ = false;
+  int hoveredRow_ = -1;
+  QRect drawRect_;
+  std::array<QRect, 12> badgeRects_{};
+  std::function<void()> onEdited_;
+};
+
 class MainDock final : public QWidget {
 public:
   explicit MainDock(QString configDirectory, QWidget *parent = nullptr,
                     QUrl testDiscordEndpoint = {}, QUrl testApiEndpoint = {});
   ~MainDock() override;
 
+  quint16 overlayPort() const { return overlayServer_ ? overlayServer_->port() : 0; }
+
 private:
+  enum class EditMode { None, NewRace, ExistingRace, PendingFirstRace, CumulativeReconcile };
+
   void refreshSources();
-  void applyFormat();
   std::vector<std::string> configuredTags() const;
-  void startStop();
+  int configuredPlayersPerTeam() const;
+  void updateDetectedFormat();
+  void startAggregation();
+  void stopAggregation(bool autoFinished = false, bool syncOverlay = true);
+  bool checkAutoFinish(bool syncOverlay = true);
   void receiveFrame(Frame frame);
   void receiveAnalysis(Analysis result, uint64_t generation, qint64 duration,
                        QDateTime frameReceivedAt);
   void workerLoop();
-  void review(const Analysis &analysis);
+  void review(const Analysis &analysis, EditMode mode = EditMode::NewRace, int raceIndex = -1);
   void confirmPending();
   void cancelReview();
-  bool commit(const std::vector<Standing> &standings, bool corrected, const Analysis &raw);
+  bool commit(const std::vector<Standing> &standings, bool corrected, const Analysis &raw,
+              QString *eventNote = nullptr);
   void updateScores();
+  void updateCourseDisplay();
+  void refreshRaceHistory();
+  void openSelectedRaceEditor();
+  std::vector<Standing> currentEditorStandings() const;
+  void updatePreview(const QImage &frame, const std::vector<Standing> &standings = {});
   void saveSettings();
   void loadSettings();
-  void undo();
   void resetSession();
   void setStatus(const QString &text, const QString &color = QStringLiteral("#80cbc4"));
-  void updateRowPreview(int row);
-  void exportDiagnostic();
   void requestRecognition(const Analysis &captured);
-  void requestJevAssistance();
-  void updateFastStatus();
-  void learnConfirmed(const Analysis &raw, const std::vector<Standing> &standings);
-  void sendDiscord();
-  void updateDiscord();
+  void requestStandingsVerification(const Analysis &captured);
+  void requestRetryRecognition();
+  void learnOverridesFromReview(const std::vector<Standing> &confirmed);
+  void syncDiscord(bool postToDiscord = true);
+  void syncDiscordCourse(const QString &course);
+  QJsonObject buildLoungePayload(bool postToDiscord) const;
+
   QString configDirectory_, savedSource_;
-  QComboBox *source_{}, *format_{};
+  QComboBox *source_{}, *raceSelector_{};
+  QLabel *detectedFormat_{};
   QLineEdit *tags_{};
-  QCheckBox *autoCommit_{};
   std::unique_ptr<JevApiReader> api_;
-  QCheckBox *apiEnabled_{};
-  QLineEdit *apiKey_{};
-  QProcess localSetup_;
-  QPushButton *setupLocal_{};
-  QLabel *localStatus_{};
-  QLabel *fastStatus_{};
-  QPushButton *jevAssist_{}, *clearFast_{};
-  std::vector<TagSample> fastSamples_, jobSamples_;
-  QString fastSource_;
-  QByteArray localSetupOutput_;
   bool requestIssued_ = false;
   uint64_t requestCycle_ = 0;
-  QImage stableNames_;
-  QLineEdit *discordToken_{}, *discordChannel_{};
-  QLabel *discordStatus_{};
-  QPushButton *discordSave_{}, *discordDelete_{}, *discordSend_{};
+  QCheckBox *postDiscord_{};
   std::unique_ptr<DiscordSender> discord_;
-  bool discordCooldown_ = false;
-  QLabel *status_{}, *diagnostic_{}, *preview_{}, *scores_{}, *reviewHelp_{};
-  QPushButton *start_{}, *refresh_{}, *manual_{}, *undo_{}, *confirm_{}, *cancel_{};
-  QTableWidget *correction_{};
+  bool hasTestDiscordEndpoint_ = false;
+  QLabel *status_{}, *diagnostic_{}, *courseLabel_{}, *scores_{}, *reviewHelp_{};
+  ResultPreviewWidget *preview_{};
+  QPushButton *start_{}, *stop_{}, *refresh_{}, *confirm_{}, *cancel_{}, *retryRead_{}, *editRace_{};
   std::unique_ptr<FrameCapture> capture_;
   std::unique_ptr<Analyzer> analyzer_;
+  std::unique_ptr<OverlayServer> overlayServer_;
+  uint64_t overlayRevision_ = 0;
   Session session_;
   QJsonArray audit_;
-  QJsonObject resultCapture_;
-  QLabel *captureStatus_{};
+  QJsonObject resultCapture_, pendingFirstAudit_;
   ResultGate gate_;
+  CourseGate courseGate_;
+  QString currentCourse_, lastSentCourse_;
   Analysis latest_, pending_;
-  QImage latestImage_;
+  std::vector<TagSample> playerOverrides_;
+  std::vector<Standing> reviewBaselineStandings_;
+  QImage latestImage_, lastCommittedFrame_;
+  std::vector<Standing> lastCommittedStandings_;
   QElapsedTimer clock_;
   bool running_ = false, reviewing_ = false, storageOk_ = true;
+  bool loungeOverlayActive_ = false;
+  QDateTime loungeOverlayUntilUtc_;
+  EditMode editMode_ = EditMode::None;
+  int editingRaceIndex_ = -1;
+  bool userTouchedReview_ = false;
+  bool standingsRequestActive_ = false;
+  int standingsStableCount_ = 0;
+  qint64 standingsFirstMs_ = 0;
+  int standingsLastTotal_ = -1;
+  std::array<int, 12> standingsStableRows_{};
+  int standingsCheckedRace_ = -1;
+  int standingsCheckedTotal_ = -1;
+  int verifiedRaceCount_ = 0;
   uint64_t generation_ = 0;
   qint64 lastFrameMs_ = 0, lastAnalysisMs_ = 0;
   std::atomic_bool frameQueued_{false};

@@ -121,4 +121,55 @@ void DiscordSender::send(QString token, QString channel, QString content, Comple
         completion(ok, message);
       });
 }
+void DiscordSender::sendLounge(QUrl endpoint, QString ingestKey, const QJsonObject &payload,
+                               Completion completion) {
+  if (busy())
+    cancel();
+  ingestKey = ingestKey.trimmed();
+  const auto url = testEndpoint_.isEmpty() ? endpoint : testEndpoint_;
+  if (!url.isValid() || url.isEmpty() || ingestKey.isEmpty() || ingestKey.contains('\r') ||
+      ingestKey.contains('\n')) {
+    completion(false, QStringLiteral("Discord Bot連携先の設定がありません。"));
+    return;
+  }
+  const auto serial = ++serial_;
+  QNetworkRequest request(url);
+  request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+  request.setRawHeader("X-ITF-Sokuji-Key", ingestKey.toUtf8());
+  request.setRawHeader("User-Agent", QByteArray("LoungeSokuji/") + QUICKSCORE_VERSION + " (OBS plugin)");
+  request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                       QNetworkRequest::ManualRedirectPolicy);
+  request.setTransferTimeout(15000);
+  auto *reply = manager_.post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+  reply_ = reply;
+  constexpr qint64 limit = 128 * 1024;
+  auto body = std::make_shared<QByteArray>();
+  reply->setReadBufferSize(limit + 1);
+  connect(reply, &QIODevice::readyRead, this, [reply, body] {
+    *body += reply->readAll();
+    if (body->size() > limit)
+      reply->abort();
+  });
+  QTimer::singleShot(15000, reply, [reply] {
+    if (!reply->isFinished())
+      reply->abort();
+  });
+  connect(
+      reply, &QNetworkReply::finished, this,
+      [this, reply, serial, body, completion = std::move(completion)] {
+        if (serial != serial_) {
+          reply->deleteLater();
+          return;
+        }
+        reply_ = nullptr;
+        *body += reply->readAll();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = body->size() <= limit && (code == 200 || code == 201 || code == 204) &&
+                        reply->error() == QNetworkReply::NoError;
+        QString message = ok ? QStringLiteral("Discordの即時チャンネルに投稿しました。")
+                             : QStringLiteral("Discord投稿に失敗しました (HTTP %1)").arg(code);
+        reply->deleteLater();
+        completion(ok, message);
+      });
+}
 } // namespace quickscore

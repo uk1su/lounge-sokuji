@@ -8,8 +8,8 @@ namespace quickscore {
 namespace {
 struct SharedImage {
   std::mutex mutex;
-  int width{640};
-  int height{360};
+  int width{840};
+  int height{160};
   uint64_t revision{};
   std::vector<uint8_t> rgba;
 } g_image;
@@ -17,8 +17,8 @@ struct SharedImage {
 struct ScoreboardSource {
   gs_texture_t *texture{};
   uint64_t revision{};
-  int width{640};
-  int height{360};
+  int width{840};
+  int height{160};
 };
 
 const char *getName(void *) { return obs_module_text("ScoreboardSource"); }

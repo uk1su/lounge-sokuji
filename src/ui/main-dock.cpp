@@ -1,48 +1,60 @@
 #include "main-dock.hpp"
-#include "fast-reader.hpp"
+#include "embedded-secrets.hpp"
 #include "result-capture.hpp"
 #include "scoreboard-source.hpp"
 #include "session-store.hpp"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
-#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
-#include <QFileDialog>
-#include <QFormLayout>
-#include <QGroupBox>
-#include <QHeaderView>
+#include <QFileInfo>
+#include <QFrame>
+#include <QGridLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
-#include <QSaveFile>
 #include <QScrollArea>
 #include <QSettings>
-#include <QSpinBox>
-#include <QTableWidget>
 #include <QTextStream>
 #include <QTimer>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 #include <obs-module.h>
-#ifdef _WIN32
-#include <windows.h>
-#endif
 namespace quickscore {
 namespace {
-int playersForFormat(int index) {
-  const int values[]{2, 3, 4, 6};
-  return values[std::clamp(index, 0, 3)];
+int playersForTeamCount(size_t teamCount) {
+  if (teamCount == 2 || teamCount == 3 || teamCount == 4 || teamCount == 6)
+    return 12 / int(teamCount);
+  return 0;
+}
+QString formatNameForPlayers(int playersPerTeam) {
+  switch (playersPerTeam) {
+  case 2:
+    return QStringLiteral("2v2");
+  case 3:
+    return QStringLiteral("3v3");
+  case 4:
+    return QStringLiteral("4v4");
+  case 6:
+    return QStringLiteral("6v6");
+  default:
+    return QString::number(playersPerTeam) + "v" + QString::number(playersPerTeam);
+  }
 }
 QWidget *buttons(std::initializer_list<QWidget *> widgets) {
   auto *row = new QWidget;
   auto *layout = new QHBoxLayout(row);
   layout->setContentsMargins(0, 0, 0, 0);
+  layout->setSpacing(4);
   for (auto *w : widgets)
     layout->addWidget(w);
   return row;
@@ -62,311 +74,516 @@ QJsonArray evidenceJson(const Analysis &a) {
   }
   return result;
 }
-bool namesAgree(const QImage &previous, const QImage &current) {
-  if (previous.isNull() || current.isNull())
-    return false;
-  for (int row = 0; row < 12; ++row) {
-    const auto a = Analyzer::rowImage(previous, row)
-                       .copy(8, 2, 92, 50)
-                       .convertToFormat(QImage::Format_Grayscale8);
-    const auto b = Analyzer::rowImage(current, row)
-                       .copy(8, 2, 92, 50)
-                       .convertToFormat(QImage::Format_Grayscale8);
-    int difference = 0;
-    for (int y = 0; y < a.height(); y += 2)
-      for (int x = 0; x < a.width(); x += 2)
-        difference += std::abs(int(a.constScanLine(y)[x]) - int(b.constScanLine(y)[x]));
-    if (difference > (a.width() / 2) * (a.height() / 2) * 8)
-      return false;
+QImage cropResultArea(const QImage &frame) {
+  if (frame.isNull() || frame.width() <= 0 || frame.height() <= 0)
+    return {};
+  const double aspect = double(frame.width()) / double(frame.height());
+  if (std::abs(aspect - 16.0 / 9.0) > 0.03)
+    return frame;
+  const QRect ref = resultTableRect();
+  if (frame.size() == QSize(1920, 1080))
+    return frame.copy(ref);
+  const QRect scaled(qRound(frame.width() * double(ref.x()) / 1920.0),
+                     qRound(frame.height() * double(ref.y()) / 1080.0),
+                     qRound(frame.width() * double(ref.width()) / 1920.0),
+                     qRound(frame.height() * double(ref.height()) / 1080.0));
+  return frame.copy(scaled.intersected(frame.rect()));
+}
+QColor colorForTeamTag(const std::string &tag, const std::vector<std::string> &teamTags) {
+  if (tag.empty())
+    return QColor(127, 29, 29);
+  static const QColor kPalette[]{
+      QColor(25, 118, 210), // Blue (Player team default)
+      QColor(198, 40, 40),  // Red
+      QColor(46, 125, 50),  // Green
+      QColor(239, 108, 0),  // Orange
+      QColor(123, 31, 162), // Purple
+      QColor(0, 131, 143),  // Teal
+  };
+  for (size_t i = 0; i < teamTags.size(); ++i) {
+    if (teamTags[i] == tag)
+      return kPalette[i % std::size(kPalette)];
   }
-  return true;
+  return QColor(69, 90, 100);
 }
 } // namespace
+
+ResultPreviewWidget::ResultPreviewWidget(QWidget *parent) : QWidget(parent) {
+  setMouseTracking(true);
+  auto policy = QSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  policy.setHeightForWidth(true);
+  setSizePolicy(policy);
+  setMinimumWidth(180);
+  setMaximumHeight(320);
+}
+
+QSize ResultPreviewWidget::sizeHint() const {
+  return QSize(270, heightForWidth(270));
+}
+
+QSize ResultPreviewWidget::minimumSizeHint() const {
+  return QSize(180, cropped_.isNull() ? 48 : heightForWidth(180));
+}
+
+int ResultPreviewWidget::heightForWidth(int width) const {
+  if (cropped_.isNull())
+    return 48;
+  const double logicalW = (standings_.size() == 12) ? 1205.0 : double(std::max(1, cropped_.width()));
+  const double logicalH = (standings_.size() == 12) ? 945.0 : double(std::max(1, cropped_.height()));
+  const int w = std::max(180, width - 6);
+  const int h = int(std::lround(w * (logicalH / logicalW))) + 6;
+  return std::clamp(h, 150, 320);
+}
+
+void ResultPreviewWidget::setPlaceholderText(const QString &text) {
+  placeholder_ = text;
+  if (cropped_.isNull())
+    update();
+}
+
+void ResultPreviewWidget::setPreview(const QImage &frame, const std::vector<Standing> &standings,
+                                     const std::vector<std::string> &teamTags,
+                                     const std::vector<RowEvidence> &evidence,
+                                     const StandingsScoreRead &cumulative) {
+  const bool wasEmpty = cropped_.isNull();
+  const bool badgeChanged = (standings_.size() == 12) != (standings.size() == 12);
+  cropped_ = cropResultArea(frame);
+  standings_ = standings;
+  teamTags_ = teamTags;
+  evidence_ = evidence;
+  cumulative_ = cumulative;
+  if (wasEmpty != cropped_.isNull() || badgeChanged)
+    updateGeometry();
+  update();
+}
+
+void ResultPreviewWidget::setEditing(bool editing, bool cumulativeMode) {
+  editing_ = editing;
+  cumulativeMode_ = cumulativeMode;
+  hoveredRow_ = -1;
+  setCursor(Qt::ArrowCursor);
+  update();
+}
+
+void ResultPreviewWidget::setRowTag(int row, const QString &tag) {
+  if (row < 0 || size_t(row) >= standings_.size())
+    return;
+  standings_[size_t(row)].tag = tag.toStdString();
+  standings_[size_t(row)].confidence = tag.isEmpty() ? 0.0 : 1.0;
+  update();
+  if (onEdited_)
+    onEdited_();
+}
+
+QString ResultPreviewWidget::rowTag(int row) const {
+  if (row < 0 || size_t(row) >= standings_.size())
+    return {};
+  return QString::fromStdString(standings_[size_t(row)].tag);
+}
+
+int ResultPreviewWidget::hitRow(const QPoint &pos) const {
+  if (!editing_ || standings_.size() != 12)
+    return -1;
+  for (int row = 0; row < 12; ++row) {
+    if (badgeRects_[size_t(row)].contains(pos))
+      return row;
+  }
+  return -1;
+}
+
+QString ResultPreviewWidget::tooltipForRow(int row) const {
+  if (row < 0 || row >= 12)
+    return {};
+  QStringList lines;
+  lines << QStringLiteral("%1位").arg(row + 1);
+  if (cumulativeMode_ && cumulative_.rows[size_t(row)].ok())
+    lines[0] += QStringLiteral(" (%1点)").arg(cumulative_.rows[size_t(row)].points);
+  if (size_t(row) < evidence_.size()) {
+    const auto &ev = evidence_[size_t(row)];
+    if (!ev.method.isEmpty())
+      lines << ev.method;
+    if (!ev.text.isEmpty())
+      lines << QStringLiteral("詳細: %1").arg(ev.text);
+  }
+  if (editing_)
+    lines << tr("クリックしてチームタグを変更");
+  return lines.join('\n');
+}
+
+void ResultPreviewWidget::paintEvent(QPaintEvent *) {
+  QPainter p(this);
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setRenderHint(QPainter::SmoothPixmapTransform);
+  p.setRenderHint(QPainter::TextAntialiasing);
+
+  p.fillRect(rect(), QColor(21, 25, 31));
+  p.setPen(QColor(66, 72, 80));
+  p.drawRect(rect().adjusted(0, 0, -1, -1));
+
+  if (cropped_.isNull()) {
+    drawRect_ = {};
+    badgeRects_.fill(QRect{});
+    p.setPen(QColor(210, 216, 224));
+    p.drawText(rect().adjusted(12, 12, -12, -12), Qt::AlignCenter | Qt::TextWordWrap, placeholder_);
+    return;
+  }
+
+  const bool showBadges = (standings_.size() == 12);
+  constexpr int kCropW = 1040;
+  constexpr int kCropH = 945;
+  constexpr int kTagPanelW = 165;
+  const double logicalW = showBadges ? double(kCropW + kTagPanelW) : double(cropped_.width());
+  const double logicalH = showBadges ? double(kCropH) : double(cropped_.height());
+
+  const QRect avail = rect().adjusted(3, 3, -3, -3);
+  if (avail.width() <= 0 || avail.height() <= 0)
+    return;
+  const double scale = std::min(avail.width() / logicalW, avail.height() / logicalH);
+  const int drawW = std::max(1, int(std::lround(logicalW * scale)));
+  const int drawH = std::max(1, int(std::lround(logicalH * scale)));
+  const int drawX = avail.left() + (avail.width() - drawW) / 2;
+  const int drawY = avail.top() + (avail.height() - drawH) / 2;
+  drawRect_ = QRect(drawX, drawY, drawW, drawH);
+
+  if (!showBadges) {
+    badgeRects_.fill(QRect{});
+    p.drawImage(drawRect_, cropped_);
+    return;
+  }
+
+  const int cropDrawW = int(std::lround(drawW * (double(kCropW) / logicalW)));
+  const QRect cropTarget(drawX, drawY, cropDrawW, drawH);
+  const QRect stripTarget(drawX + cropDrawW, drawY, drawW - cropDrawW, drawH);
+  p.drawImage(cropTarget, cropped_);
+  p.fillRect(stripTarget, QColor(22, 26, 32));
+  p.setPen(QColor(56, 65, 78));
+  p.drawLine(stripTarget.left(), stripTarget.top(), stripTarget.left(), stripTarget.bottom());
+
+  const double sx = double(drawW) / logicalW;
+  const double sy = double(drawH) / logicalH;
+  QFont font = p.font();
+  font.setPixelSize(std::max(9, int(std::lround(34.0 * sy))));
+  font.setBold(true);
+  p.setFont(font);
+
+  for (int row = 0; row < 12; ++row) {
+    const double centerLogicalY = 112.0 + 78.0 * row - 70.0;
+    const int bx = int(std::lround(drawX + (kCropW + 8.0) * sx));
+    const int by = int(std::lround(drawY + (centerLogicalY - 28.0) * sy));
+    const int bw = std::max(22, int(std::lround((kTagPanelW - 16.0) * sx)));
+    const int bh = std::max(12, int(std::lround(56.0 * sy)));
+    const QRect badge(bx, by, bw, bh);
+    badgeRects_[size_t(row)] = badge;
+
+    const std::string &tag = standings_[size_t(row)].tag;
+    QColor bg = colorForTeamTag(tag, teamTags_);
+    if (editing_ && hoveredRow_ == row)
+      bg = bg.lighter(120);
+    p.setBrush(bg);
+
+    if (editing_ && hoveredRow_ == row)
+      p.setPen(QPen(Qt::white, 2.0));
+    else if (tag.empty())
+      p.setPen(QPen(QColor(255, 183, 77), editing_ ? 2.0 : 1.5));
+    else
+      p.setPen(QPen(bg.lighter(editing_ ? 145 : 130), editing_ ? 1.5 : 1.0));
+
+    const qreal radius = std::max(3.0, 12.0 * sy);
+    p.drawRoundedRect(badge, radius, radius);
+
+    p.setPen(Qt::white);
+    QString label = tag.empty() ? QStringLiteral("?") : QString::fromStdString(tag);
+    if (cumulativeMode_ && cumulative_.rows[size_t(row)].ok())
+      label = QString("%1 %2").arg(cumulative_.rows[size_t(row)].points).arg(label);
+    if (editing_)
+      label += QStringLiteral(" ▾");
+    p.drawText(badge.adjusted(3, 0, -3, 0), Qt::AlignCenter,
+               p.fontMetrics().elidedText(label, Qt::ElideRight, std::max(10, badge.width() - 6)));
+  }
+}
+
+void ResultPreviewWidget::mouseMoveEvent(QMouseEvent *event) {
+  const int row = hitRow(event->pos());
+  if (row != hoveredRow_) {
+    hoveredRow_ = row;
+    update();
+  }
+  setCursor(editing_ && row >= 0 ? Qt::PointingHandCursor : Qt::ArrowCursor);
+  if (row >= 0) {
+    const QString tip = tooltipForRow(row);
+    if (!tip.isEmpty())
+      QToolTip::showText(event->globalPosition().toPoint(), tip, this);
+  }
+  QWidget::mouseMoveEvent(event);
+}
+
+void ResultPreviewWidget::leaveEvent(QEvent *event) {
+  if (hoveredRow_ >= 0) {
+    hoveredRow_ = -1;
+    update();
+  }
+  setCursor(Qt::ArrowCursor);
+  QWidget::leaveEvent(event);
+}
+
+void ResultPreviewWidget::mousePressEvent(QMouseEvent *event) {
+  if (editing_ && event->button() == Qt::LeftButton) {
+    const int row = hitRow(event->pos());
+    if (row >= 0) {
+      QMenu menu(this);
+      auto *clearAct = menu.addAction(tr("未選択"));
+      clearAct->setData(QString{});
+      for (const auto &t : teamTags_) {
+        const QString qtag = QString::fromStdString(t);
+        QPixmap swatch(14, 14);
+        swatch.fill(colorForTeamTag(t, teamTags_));
+        auto *act = menu.addAction(QIcon(swatch), qtag);
+        act->setData(qtag);
+      }
+      QAction *picked = menu.exec(mapToGlobal(badgeRects_[size_t(row)].bottomLeft()));
+      if (picked)
+        setRowTag(row, picked->data().toString());
+      return;
+    }
+  }
+  QWidget::mousePressEvent(event);
+}
+
 MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
                    QUrl testApiEndpoint)
-    : QWidget(parent), configDirectory_(std::move(directory)) {
+    : QWidget(parent), configDirectory_(std::move(directory)),
+      hasTestDiscordEndpoint_(!testDiscordEndpoint.isEmpty()) {
   clock_.start();
+  setMinimumWidth(230);
   auto *outer = new QVBoxLayout(this);
   outer->setContentsMargins(0, 0, 0, 0);
   auto *scroll = new QScrollArea;
   scroll->setWidgetResizable(true);
+  scroll->setFrameShape(QFrame::NoFrame);
+  scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   outer->addWidget(scroll);
   auto *body = new QWidget;
+  body->setStyleSheet(
+      "QPushButton{padding:2px 6px;font-size:11.5px;min-height:19px;}"
+      "QComboBox,QLineEdit{padding:1px 5px;font-size:11.5px;min-height:19px;}"
+      "QLabel{font-size:11.5px;}"
+      "QCheckBox{font-size:11.5px;}");
   scroll->setWidget(body);
   auto *layout = new QVBoxLayout(body);
-  auto *title = new QLabel(tr("QUICKSCORE  0.8.1 / Jev API"));
-  title->setStyleSheet("font-size:20px;font-weight:700;");
-  layout->addWidget(title);
-  auto *setup = new QGroupBox(tr("ゲーム映像とチーム"));
-  auto *form = new QFormLayout(setup);
+  layout->setContentsMargins(5, 4, 5, 4);
+  layout->setSpacing(3);
+
+  auto *setup = new QFrame;
+  setup->setStyleSheet("QFrame#setupPanel{border:1px solid #3c4552;border-radius:4px;}");
+  setup->setObjectName("setupPanel");
+  auto *form = new QGridLayout(setup);
+  form->setContentsMargins(5, 4, 5, 4);
+  form->setSpacing(4);
   source_ = new QComboBox;
-  refresh_ = new QPushButton(tr("再読込"));
-  form->addRow(tr("元映像"), buttons({source_, refresh_}));
-  format_ = new QComboBox;
-  format_->addItems({"2v2", "3v3", "4v4", "6v6"});
-  format_->setCurrentIndex(1);
+  source_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  source_->setMinimumContentsLength(5);
+  source_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  refresh_ = new QPushButton(tr("更新"));
+  refresh_->setToolTip(tr("映像ソース一覧を更新"));
+  refresh_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   tags_ = new QLineEdit("A, B, C, D");
-  tags_->setPlaceholderText(tr("一番左に自分のチームタグを入れてください (例: A, B, C, D)"));
-  form->addRow(tr("形式"), format_);
-  form->addRow(tr("タグ（一番左に自分のチームタグを入れてください）"), tags_);
-  auto *hint =
-      new QLabel(tr("キャプチャーボードなど、16:9の元ゲーム映像を選んでください。\n"
-                    "※タグの一番左が自分のチームとして認識され、点差や順位が計算されます。\n"
-                    "名前の先頭1文字でチームを判定します。チーム間で先頭文字は重複できません。"));
-  hint->setWordWrap(true);
-  form->addRow(hint);
+  tags_->setPlaceholderText(tr("左端=自チーム (例: M, う, A, L, B, R)"));
+  tags_->setToolTip(tr("一番左に自分のチームタグを入れてください (例: M, う, A, L, B, R)"));
+  tags_->setMinimumWidth(60);
+  detectedFormat_ = new QLabel(tr("3v3"));
+  detectedFormat_->setObjectName("detectedFormat");
+  detectedFormat_->setAlignment(Qt::AlignCenter);
+  detectedFormat_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  detectedFormat_->setStyleSheet(
+      "font-size:11px;font-weight:700;color:#80cbc4;background:#1e2630;border:1px solid "
+      "#3c4552;border-radius:3px;padding:1px 6px;");
+  auto *srcLbl = new QLabel(tr("映像"));
+  srcLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  auto *tagLbl = new QLabel(tr("タグ"));
+  tagLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  form->addWidget(srcLbl, 0, 0);
+  form->addWidget(source_, 0, 1);
+  form->addWidget(refresh_, 0, 2);
+  form->addWidget(tagLbl, 1, 0);
+  form->addWidget(tags_, 1, 1);
+  form->addWidget(detectedFormat_, 1, 2);
+  form->setColumnStretch(1, 1);
   layout->addWidget(setup);
-  auto *fastGroup = new QGroupBox(tr("交流戦版と同じ画像照合"));
-  auto *fastForm = new QFormLayout(fastGroup);
-  fastStatus_ = new QLabel;
-  fastStatus_->setObjectName("fastStatus");
-  fastStatus_->setWordWrap(true);
-  fastForm->addRow(fastStatus_);
-  clearFast_ = new QPushButton(tr("名前の見本を登録し直す"));
-  clearFast_->setObjectName("clearFast");
-  fastForm->addRow(clearFast_);
-  connect(clearFast_, &QPushButton::clicked, this, [this] {
-    if (running_)
-      return;
-    fastSamples_.clear();
-    fastSource_.clear();
-    QString error;
-    saveSamples(configDirectory_ + "/fast-templates.json", fastSamples_, error);
-    saveSettings();
-    updateFastStatus();
-    if (!error.isEmpty())
-      fastStatus_->setText(tr("見本の更新を保存できません: %1").arg(error));
-  });
-  autoCommit_ = new QCheckBox(tr("検証を通った結果を自動集計する"));
-  autoCommit_->setObjectName("autoCommit");
-  fastForm->addRow(autoCommit_);
-  layout->addWidget(fastGroup);
-  auto *reading = new QGroupBox(tr("Jev API / TypeSafe"));
-  auto *readingForm = new QFormLayout(reading);
+
   api_ = std::make_unique<JevApiReader>(configDirectory_, testApiEndpoint);
-  apiEnabled_ = new QCheckBox(tr("Jev APIでリザルトを判定する"));
-  apiEnabled_->setObjectName("jevApiEnabled");
-  apiEnabled_->setChecked(true);
-  readingForm->addRow(apiEnabled_);
-  auto *apiHint = new QLabel(tr("12人の名前の先頭部分だけをTypeSafeへ送信します。モデルのダウンロー"
-                                "ドは不要です。初期設定では判定後に12人を確認します。"));
-  apiHint->setWordWrap(true);
-  readingForm->addRow(apiHint);
-  apiKey_ = new QLineEdit;
-  apiKey_->setObjectName("jevApiKey");
-  apiKey_->setEchoMode(QLineEdit::Password);
-  apiKey_->setPlaceholderText(tr("保存後は空欄になります"));
-  readingForm->addRow(tr("APIキー"), apiKey_);
-  setupLocal_ = new QPushButton(tr("APIキーを保存"));
-  setupLocal_->setObjectName("saveJevApiKey");
-  readingForm->addRow(setupLocal_);
-  localStatus_ =
-      new QLabel(api_->configurationError().isEmpty() ? tr("APIキー設定済み。モデル: jev-1.14.0")
-                                                      : api_->configurationError());
-  localStatus_->setWordWrap(true);
-  readingForm->addRow(localStatus_);
-  connect(setupLocal_, &QPushButton::clicked, this, [this] {
-    const auto key = apiKey_->text().trimmed();
-    QString error;
-    if (key.isEmpty() || key.contains('\n') || key.contains('\r')) {
-      localStatus_->setText(tr("APIキーを入力してください。"));
-      return;
-    }
-    const bool ok = saveStoredCredential(configDirectory_, "JevApi", key, error);
-    apiKey_->clear();
-    localStatus_->setText(ok ? tr("APIキーを保存しました。保存だけでは送信しません。") : error);
-  });
-  layout->addWidget(reading);
+
   start_ = new QPushButton(tr("集計開始"));
-  manual_ = new QPushButton(tr("現在のリザルトを確認"));
-  manual_->setEnabled(false);
-  layout->addWidget(buttons({start_, manual_}));
+  stop_ = new QPushButton(tr("集計停止"));
+  stop_->setEnabled(false);
+  auto *reset = new QPushButton(tr("リセット"));
+  reset->setObjectName("reset");
+  reset->setToolTip(tr("集計リセット"));
+  layout->addWidget(buttons({start_, stop_, reset}));
+
   status_ = new QLabel;
   status_->setWordWrap(true);
+  status_->setMinimumWidth(120);
+  status_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
   layout->addWidget(status_);
+
   diagnostic_ = new QLabel(tr("映像待ち"));
   diagnostic_->setWordWrap(true);
+  diagnostic_->setMinimumWidth(120);
+  diagnostic_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+  diagnostic_->setStyleSheet("font-size:10.5px;color:#9aa4b2;");
   layout->addWidget(diagnostic_);
-  preview_ = new QLabel(tr("集計開始後、ここに解析対象の映像を表示します"));
-  preview_->setAlignment(Qt::AlignCenter);
-  preview_->setMinimumHeight(130);
-  preview_->setStyleSheet("background:#15191f;border:1px solid #424850;");
+
+  courseLabel_ = new QLabel;
+  courseLabel_->setWordWrap(true);
+  courseLabel_->setMinimumWidth(120);
+  courseLabel_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+  courseLabel_->setStyleSheet(
+      "font-size:11.5px;font-weight:700;color:#80cbc4;background:#10141a;border:1px solid "
+      "#2b3842;border-radius:4px;padding:3px 7px;");
+  updateCourseDisplay();
+  layout->addWidget(courseLabel_);
+
+  preview_ = new ResultPreviewWidget;
+  preview_->setPlaceholderText(tr("集計開始後、ここにリザルトを表示します"));
+  preview_->setOnEdited([this] { userTouchedReview_ = true; });
   layout->addWidget(preview_);
-  captureStatus_ = new QLabel(tr("リザルト判定時に、画面全体と順位一覧の画像を自動保存します。"));
-  captureStatus_->setObjectName("captureStatus");
-  captureStatus_->setWordWrap(true);
-  layout->addWidget(captureStatus_);
-  auto *captureFolder = new QPushButton(tr("リザルト画像の保存フォルダーを開く"));
-  captureFolder->setObjectName("captureFolder");
-  layout->addWidget(captureFolder);
-  connect(captureFolder, &QPushButton::clicked, this, [this] {
-    const auto directory = QDir(configDirectory_).absoluteFilePath("captures");
-    if (!QDir().mkpath(directory) || !QDesktopServices::openUrl(QUrl::fromLocalFile(directory)))
-      captureStatus_->setText(
-          tr("保存フォルダーを開けません: %1").arg(QDir::toNativeSeparators(directory)));
-  });
-  scores_ = new QLabel;
-  scores_->setWordWrap(true);
-  scores_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-  scores_->setStyleSheet(
-      "font-size:17px;font-weight:700;color:#eceff1;background:#10141a;border:1px solid "
-      "#37474f;border-radius:6px;padding:8px 12px;");
-  layout->addWidget(scores_);
-  auto *discordGroup = new QGroupBox(tr("Discordへの手動送信"));
-  auto *discordForm = new QFormLayout(discordGroup);
-  discordToken_ = new QLineEdit;
-  discordToken_->setEchoMode(QLineEdit::Password);
-  discordToken_->setPlaceholderText(tr("Discord Botトークン（保存後は空欄になります）"));
-  discordToken_->setObjectName("discordToken");
-  discordChannel_ = new QLineEdit;
-  discordChannel_->setPlaceholderText(tr("送信先チャンネルID または チャンネルURL"));
-  discordChannel_->setObjectName("discordChannel");
-  discordSave_ = new QPushButton(tr("Discord設定を保存"));
-  discordSave_->setObjectName("discordSave");
-  discordDelete_ = new QPushButton(tr("Botトークンを削除"));
-  discordSend_ = new QPushButton(tr("Discordへ送信"));
-  discordSend_->setObjectName("discordSend");
-  discordStatus_ = new QLabel;
-  discordStatus_->setWordWrap(true);
-  discordStatus_->setObjectName("discordStatus");
-  discordForm->addRow(tr("Botトークン"), discordToken_);
-  discordForm->addRow(tr("送信先"), discordChannel_);
-  discordForm->addRow(buttons({discordSave_, discordDelete_}));
-  discordForm->addRow(discordSend_);
-  discordForm->addRow(discordStatus_);
-  auto *discordHint = new QLabel(
-      tr("Botをサーバーに参加させ、送信先の閲覧・メッセージ送信権限を付与してください。\n"
-         "上の確定済み集計を1行で送信します。ボタンを押したときだけ送信します。"));
-  discordHint->setWordWrap(true);
-  discordForm->addRow(discordHint);
-  layout->addWidget(discordGroup);
-  discord_ = std::make_unique<DiscordSender>(nullptr, testDiscordEndpoint);
-  connect(discordSave_, &QPushButton::clicked, this, [this] {
-    const auto channel = discordChannelId(discordChannel_->text());
-    if (channel.isEmpty()) {
-      discordStatus_->setText(tr("チャンネルID または DiscordのチャンネルURLを入力してください。"));
-      return;
-    }
-    QString error;
-    if (!discordToken_->text().trimmed().isEmpty() &&
-        !saveStoredCredential(configDirectory_, "DiscordBot", discordToken_->text(), error)) {
-      discordToken_->clear();
-      discordStatus_->setText(error);
-      return;
-    }
-    discordToken_->clear();
-    discordChannel_->setText(channel);
-    saveSettings();
-    discordStatus_->setText(
-        loadStoredCredential(configDirectory_, "DiscordBot").isEmpty()
-            ? tr("Botトークン未設定です。入力して「Discord設定を保存」を押してください。")
-            : tr("Discord設定を保存しました。確定済み集計を「Discordへ送信」で送れます。"));
-    updateDiscord();
-  });
-  connect(discordDelete_, &QPushButton::clicked, this, [this] {
-    QString error;
-    const bool ok = saveStoredCredential(configDirectory_, "DiscordBot", {}, error);
-    discordToken_->clear();
-    discordStatus_->setText(ok ? tr("Botトークンを削除しました。") : error);
-    updateDiscord();
-  });
-  connect(discordSend_, &QPushButton::clicked, this, [this] { sendDiscord(); });
-  connect(discordChannel_, &QLineEdit::textChanged, this, [this] { updateDiscord(); });
-  undo_ = new QPushButton(tr("Undo"));
-  auto *reset = new QPushButton(tr("集計リセット"));
-  auto *diagnose = new QPushButton(tr("診断を保存"));
-  layout->addWidget(buttons({undo_, reset, diagnose}));
-  reviewHelp_ = new QLabel(tr("12人のチームを確認してください。判定が曖昧な行は未選択です。"));
+
+  reviewHelp_ = new QLabel(tr("右のバッジをクリックしてチームを選択してください。"));
   reviewHelp_->setWordWrap(true);
+  reviewHelp_->setMinimumWidth(120);
+  reviewHelp_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+  reviewHelp_->setStyleSheet("font-size:10.5px;color:#cfd8dc;");
   reviewHelp_->hide();
   layout->addWidget(reviewHelp_);
-  correction_ = new QTableWidget(12, 3);
-  correction_->setHorizontalHeaderLabels({tr("順位"), tr("名前画像"), tr("チーム")});
-  correction_->verticalHeader()->hide();
-  correction_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  correction_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-  correction_->setMinimumHeight(480);
-  correction_->hide();
-  layout->addWidget(correction_);
-  confirm_ = new QPushButton(tr("確認した内容で集計"));
-  cancel_ = new QPushButton(tr("この結果をスキップ"));
-  jevAssist_ = new QPushButton(tr("Jev APIでチームを再判定する"));
-  jevAssist_->setObjectName("jevAssist");
-  for (auto *b : {confirm_, cancel_, jevAssist_})
+
+  confirm_ = new QPushButton(tr("確定して集計"));
+  cancel_ = new QPushButton(tr("スキップ"));
+  retryRead_ = new QPushButton(tr("再判定"));
+  retryRead_->setObjectName("retryRead");
+  retryRead_->setToolTip(tr("チームを再判定する"));
+  for (auto *b : {confirm_, cancel_, retryRead_})
     b->hide();
-  layout->addWidget(jevAssist_);
-  layout->addWidget(buttons({confirm_, cancel_}));
+  layout->addWidget(buttons({confirm_, cancel_, retryRead_}));
+
+  scores_ = new QLabel;
+  scores_->setWordWrap(true);
+  scores_->setMinimumWidth(120);
+  scores_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+  scores_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  scores_->setStyleSheet(
+      "font-size:12.5px;font-weight:700;color:#eceff1;background:#10141a;border:1px solid "
+      "#37474f;border-radius:4px;padding:4px 7px;");
+  layout->addWidget(scores_);
+
+  postDiscord_ = new QCheckBox(tr("discordの即時チャンネルにも投稿する"));
+  postDiscord_->setObjectName("postDiscord");
+  layout->addWidget(postDiscord_);
+
+  discord_ = std::make_unique<DiscordSender>(nullptr, testDiscordEndpoint);
+  connect(postDiscord_, &QCheckBox::clicked, this, [this](bool checked) {
+    saveSettings();
+    if (checked && (running_ || !session_.races().empty()))
+      syncDiscord(!session_.races().empty());
+  });
+
+  raceSelector_ = new QComboBox;
+  raceSelector_->setObjectName("raceHistory");
+  raceSelector_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  raceSelector_->setMinimumContentsLength(6);
+  raceSelector_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  editRace_ = new QPushButton(tr("選択修正"));
+  editRace_->setObjectName("editRace");
+  editRace_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  layout->addWidget(buttons({raceSelector_, editRace_}));
+
   layout->addStretch();
+
   connect(refresh_, &QPushButton::clicked, this, [this] { refreshSources(); });
-  connect(format_, qOverload<int>(&QComboBox::currentIndexChanged), this,
-          [this] { applyFormat(); });
-  connect(start_, &QPushButton::clicked, this, [this] { startStop(); });
-  connect(manual_, &QPushButton::clicked, this, [this] {
-    if (latest_.complete() && !gate_.locked()) {
-      requestRecognition(latest_);
-    }
-  });
+  connect(tags_, &QLineEdit::textChanged, this, [this] { updateDetectedFormat(); });
+  connect(start_, &QPushButton::clicked, this, [this] { startAggregation(); });
+  connect(stop_, &QPushButton::clicked, this, [this] { stopAggregation(); });
   connect(confirm_, &QPushButton::clicked, this, [this] { confirmPending(); });
-  connect(jevAssist_, &QPushButton::clicked, this, [this] { requestJevAssistance(); });
+  connect(retryRead_, &QPushButton::clicked, this, [this] { requestRetryRecognition(); });
   connect(cancel_, &QPushButton::clicked, this, [this] {
-    gate_.lock();
+    const auto prevMode = editMode_;
+    if (prevMode == EditMode::NewRace)
+      gate_.lock();
     cancelReview();
-    setStatus(tr("スキップしました。次のレースを待機します。"));
+    if (prevMode == EditMode::NewRace)
+      setStatus(tr("スキップしました。次のレースを待機します。"));
+    else if (prevMode == EditMode::CumulativeReconcile)
+      setStatus(tr("総合順位表の検算をスキップしました。"));
+    else
+      setStatus(tr("修正をキャンセルしました。"));
   });
-  connect(undo_, &QPushButton::clicked, this, [this] { undo(); });
   connect(reset, &QPushButton::clicked, this, [this] { resetSession(); });
-  connect(diagnose, &QPushButton::clicked, this, [this] { exportDiagnostic(); });
-  preview_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  connect(editRace_, &QPushButton::clicked, this, [this] { openSelectedRaceEditor(); });
+
+  preview_->setObjectName("preview");
   source_->setObjectName("source");
-  format_->setObjectName("format");
   tags_->setObjectName("tags");
   start_->setObjectName("start");
+  stop_->setObjectName("stop");
   scores_->setObjectName("scores");
   status_->setObjectName("status");
   diagnostic_->setObjectName("diagnostic");
-  manual_->setObjectName("manual");
-  correction_->setObjectName("correction");
   confirm_->setObjectName("confirm");
   cancel_->setObjectName("cancel");
-  undo_->setObjectName("undo");
+
   loadSettings();
   refreshSources();
-  connect(source_, qOverload<int>(&QComboBox::currentIndexChanged), this,
-          [this] { updateFastStatus(); });
-  connect(tags_, &QLineEdit::textChanged, this, [this] { updateFastStatus(); });
-  QString sampleError;
-  if (!loadSamples(configDirectory_ + "/fast-templates.json", fastSamples_, sampleError)) {
-    fastSamples_.clear();
-    blog(LOG_WARNING, "[MK8DX QuickScore] fast templates could not be loaded: %s",
-         sampleError.toUtf8().constData());
-  }
-  updateFastStatus();
+
+  QString overrideError;
+  if (!loadSamples(configDirectory_ + "/player-overrides.json", playerOverrides_, overrideError))
+    playerOverrides_.clear();
+
   QString error;
   if (!loadSession(configDirectory_ + "/session.json", session_, audit_, error)) {
     storageOk_ = false;
     setStatus(error, "#ff8a80");
   } else {
     if (!session_.races().empty()) {
-      const int p = session_.playersPerTeam();
-      format_->setCurrentIndex(p == 2 ? 0 : p == 3 ? 1 : p == 4 ? 2 : 3);
       QStringList tags;
       for (const auto &s : session_.tags())
         tags << QString::fromStdString(s);
       tags_->setText(tags.join(", "));
     }
+    updateDetectedFormat();
     setStatus(tr("準備完了。開始後、リザルト以外の画面を3秒映すと自動集計を待機します。"));
   }
+
   char *path = obs_module_file("templates.mkr");
+  const QString templatesPath = QString::fromUtf8(path ? path : "");
   try {
     if (!path)
       throw std::runtime_error("templates.mkr missing");
-    analyzer_ = std::make_unique<Analyzer>(QString::fromUtf8(path));
+    analyzer_ = std::make_unique<Analyzer>(templatesPath);
   } catch (const std::exception &e) {
     setStatus(tr("認識テンプレートを読み込めません: %1").arg(QString::fromUtf8(e.what())),
               "#ff8a80");
     start_->setEnabled(false);
   }
   bfree(path);
+
+  overlayServer_ = std::make_unique<OverlayServer>(this);
+  char *overlayPathRaw = obs_module_file("overlay.html");
+  const QString overlayPath =
+      overlayPathRaw ? QString::fromUtf8(overlayPathRaw)
+                     : (templatesPath.isEmpty()
+                            ? QString()
+                            : QFileInfo(templatesPath).dir().filePath("overlay.html"));
+  if (overlayPathRaw)
+    bfree(overlayPathRaw);
+  if (overlayServer_->loadHtmlFile(overlayPath) && !configDirectory_.isEmpty()) {
+    QFile outHtml(configDirectory_ + "/overlay.html");
+    if (outHtml.open(QIODevice::WriteOnly | QIODevice::Truncate))
+      outHtml.write(overlayServer_->htmlContent());
+  }
+  if (overlayServer_->start(hasTestDiscordEndpoint_ ? 0 : 18421)) {
+    blog(LOG_INFO, "[MK8DX QuickScore] Overlay HTTP URL: http://127.0.0.1:%u/overlay.html",
+         unsigned(overlayServer_->port()));
+  }
+
   capture_ = std::make_unique<FrameCapture>([this](Frame frame) {
     if (frameQueued_.exchange(true))
       return;
@@ -386,7 +603,6 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
       return;
     if (clock_.elapsed() - lastFrameMs_ > 2500) {
       if (api_->busy()) {
-
         api_->cancel();
         ++generation_;
       }
@@ -396,17 +612,13 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   });
   timer->start();
   updateScores();
+  refreshRaceHistory();
 }
+
 MainDock::~MainDock() {
   running_ = false;
   ++generation_;
-
   api_->cancel();
-  if (localSetup_.state() != QProcess::NotRunning) {
-    QProcess::execute("taskkill.exe",
-                      {"/PID", QString::number(localSetup_.processId()), "/T", "/F"});
-    localSetup_.waitForFinished(300);
-  }
   discord_->cancel();
   capture_->stop();
   capture_.reset();
@@ -419,6 +631,7 @@ MainDock::~MainDock() {
     worker_.join();
   saveSettings();
 }
+
 void MainDock::refreshSources() {
   const QString old = source_->currentData().toString();
   source_->clear();
@@ -438,12 +651,7 @@ void MainDock::refreshSources() {
   if (found >= 0)
     source_->setCurrentIndex(found);
 }
-void MainDock::applyFormat() {
-  QStringList values;
-  for (int i = 0; i < 12 / playersForFormat(format_->currentIndex()); ++i)
-    values << QString(QChar('A' + i));
-  tags_->setText(values.join(", "));
-}
+
 std::vector<std::string> MainDock::configuredTags() const {
   std::vector<std::string> out;
   for (const auto &p : tags_->text().split(',')) {
@@ -453,47 +661,95 @@ std::vector<std::string> MainDock::configuredTags() const {
   }
   return out;
 }
-void MainDock::startStop() {
-  if (running_) {
-    running_ = false;
-    ++generation_;
 
-    api_->cancel();
-    capture_->stop();
-    gate_.pause();
-    cancelReview();
-    manual_->setEnabled(false);
-    start_->setText(tr("集計開始"));
-    for (auto *w : std::initializer_list<QWidget *>{source_, format_, tags_, refresh_, autoCommit_,
-                                                    setupLocal_, clearFast_, apiEnabled_, apiKey_})
-      w->setEnabled(true);
-    setStatus(tr("停止中"));
+int MainDock::configuredPlayersPerTeam() const {
+  return playersForTeamCount(configuredTags().size());
+}
+
+void MainDock::updateDetectedFormat() {
+  if (!detectedFormat_)
     return;
+  const int players = configuredPlayersPerTeam();
+  if (players > 0) {
+    detectedFormat_->setText(formatNameForPlayers(players));
+    detectedFormat_->setStyleSheet(
+        "font-size:11px;font-weight:700;color:#80cbc4;background:#1e2630;border:1px solid "
+        "#3c4552;border-radius:3px;padding:1px 6px;");
+  } else {
+    detectedFormat_->setText(tr("タグ数%1").arg(int(configuredTags().size())));
+    detectedFormat_->setStyleSheet(
+        "font-size:11px;font-weight:700;color:#ff8a80;background:#2b1b1d;border:1px solid "
+        "#7f3337;border-radius:3px;padding:1px 6px;");
   }
+  if (scores_ && session_.races().empty() && !session_.hasPendingFirstRace())
+    updateScores();
+}
+
+void MainDock::stopAggregation(bool autoFinished, bool syncOverlay) {
+  if (!running_)
+    return;
+  running_ = false;
+  if (autoFinished) {
+    loungeOverlayActive_ = true;
+    if (!loungeOverlayUntilUtc_.isValid())
+      loungeOverlayUntilUtc_ = QDateTime::currentDateTimeUtc().addSecs(60);
+  } else {
+    loungeOverlayActive_ = false;
+    loungeOverlayUntilUtc_ = {};
+  }
+  ++generation_;
+  api_->cancel();
+  capture_->stop();
+  gate_.pause();
+  courseGate_.reset();
+  currentCourse_.clear();
+  updateCourseDisplay();
+  standingsRequestActive_ = false;
+  standingsStableCount_ = 0;
+  standingsLastTotal_ = -1;
+  standingsStableRows_.fill(-1);
+  cancelReview();
+  start_->setEnabled(analyzer_ != nullptr);
+  stop_->setEnabled(false);
+  for (auto *w : std::initializer_list<QWidget *>{source_, tags_, refresh_})
+    w->setEnabled(true);
+  setStatus(tr("停止中"));
+  if (syncOverlay)
+    syncDiscord(false);
+}
+
+bool MainDock::checkAutoFinish(bool syncOverlay) {
+  if (!running_ || session_.effectiveRaceCount() < 12)
+    return false;
+  stopAggregation(true, syncOverlay);
+  setStatus(tr("12レース終了したため自動停止しました。"));
+  return true;
+}
+
+void MainDock::startAggregation() {
+  if (running_)
+    return;
   if (!storageOk_) {
     QMessageBox::warning(this, tr("保存データの確認"),
                          tr("保存データに読み込みエラーがあります。元ファイルを退避・確認してOBSを"
                             "再起動してください。"));
     return;
   }
-  if (apiEnabled_->isChecked() && !api_->configurationError().isEmpty()) {
+  if (!api_->configurationError().isEmpty()) {
     setStatus(api_->configurationError(), "#ffb74d");
     return;
   }
   auto tags = configuredTags();
-  const int players = playersForFormat(format_->currentIndex());
-  if (int(tags.size()) * players != 12) {
-    QMessageBox::warning(this, tr("設定エラー"),
-                         tr("チーム数 × 人数が12になるように設定してください。"));
+  const int players = playersForTeamCount(tags.size());
+  if (players <= 0) {
+    QMessageBox::warning(
+        this, tr("設定エラー"),
+        tr("タグ数は 2(6v6)・3(4v4)・4(3v3)・6(2v2) のいずれかになるよう入力してください。"));
     return;
   }
   QString tagError;
   if (!validateTeamTags(tags, &tagError)) {
     QMessageBox::warning(this, tr("設定エラー"), tagError);
-    return;
-  }
-  if (localSetup_.state() != QProcess::NotRunning) {
-    setStatus(tr("モデルの準備が完了するまでお待ちください。"));
     return;
   }
   if (!session_.races().empty() &&
@@ -507,69 +763,81 @@ void MainDock::startStop() {
   if (!canvas) {
     selected = obs_get_source_by_name(source_->currentData().toString().toUtf8().constData());
     if (!selected) {
-      setStatus(tr("映像ソースが見つかりません。再読込してください。"), "#ff8a80");
+      setStatus(tr("映像ソースが見つかりません。更新してください。"), "#ff8a80");
       return;
     }
   }
   session_.configure(tags, players);
   ++generation_;
   gate_.pause();
+  courseGate_.reset();
+  currentCourse_.clear();
+  updateCourseDisplay();
   requestIssued_ = false;
   requestCycle_ = gate_.cycle();
-  stableNames_ = {};
   latest_ = {};
   latestImage_ = {};
+  lastCommittedFrame_ = {};
+  lastCommittedStandings_.clear();
+  standingsRequestActive_ = false;
+  standingsStableCount_ = 0;
+  standingsLastTotal_ = -1;
+  standingsStableRows_.fill(-1);
   latestFrameReceivedAt_ = {};
   resultCapture_ = {};
   capture_->setSource(selected);
   if (selected)
     obs_source_release(selected);
   running_ = true;
+  loungeOverlayActive_ = true;
+  loungeOverlayUntilUtc_ = {};
   lastFrameMs_ = lastAnalysisMs_ = clock_.elapsed();
   capture_->start();
-  for (auto *w : std::initializer_list<QWidget *>{source_, format_, tags_, refresh_, autoCommit_,
-                                                  setupLocal_, clearFast_, apiEnabled_, apiKey_})
+  for (auto *w : std::initializer_list<QWidget *>{source_, tags_, refresh_})
     w->setEnabled(false);
-  start_->setText(tr("集計停止"));
-  setStatus(tr("映像を確認中。リザルト以外を3秒映すと自動待機します。現在の結果は確認ボタンから手動"
-               "集計できます。"));
+  start_->setEnabled(false);
+  stop_->setEnabled(true);
+  setStatus(tr("映像を確認中（リザルト以外を3秒映すと自動待機）"));
   saveSettings();
   updateScores();
-  updateFastStatus();
+  syncDiscord(false);
 }
+
+void MainDock::updatePreview(const QImage &frame, const std::vector<Standing> &standings) {
+  const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
+  preview_->setPreview(frame, standings, activeTags, latest_.evidence, latest_.cumulativeScores);
+}
+
 void MainDock::receiveFrame(Frame frame) {
   if (!running_)
     return;
   lastFrameMs_ = clock_.elapsed();
   QImage view(frame.rgba.data(), frame.width, frame.height, frame.stride, QImage::Format_RGBA8888);
   latestImage_ = view.copy();
-  if (!reviewing_)
-    preview_->setPixmap(QPixmap::fromImage(latestImage_)
-                            .scaled(480, 270, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-  // Keep receiving the current image for the final stability check, but avoid
-  // repeating the expensive layout search while the GPU is making a decision.
-  if (api_->busy())
-    return;
-  if (busy_ || reviewing_ || !analyzer_)
+  const bool holdCommittedPreview =
+      gate_.locked() && !lastCommittedFrame_.isNull() && lastCommittedStandings_.size() == 12 &&
+      (latest_.complete() || latest_.layout.visible || latest_.isCumulativeStandings());
+  if (!reviewing_ && !holdCommittedPreview)
+    updatePreview(latestImage_);
+  if (api_->busy() || busy_ || reviewing_ || !analyzer_)
     return;
   {
     std::lock_guard<std::mutex> lock(workerMutex_);
     jobImage_ = latestImage_;
     jobFrameReceivedAt_ = QDateTime::currentDateTimeUtc();
     jobTags_ = session_.tags();
-    jobSamples_ =
-        fastSource_ == source_->currentData().toString() ? fastSamples_ : std::vector<TagSample>{};
     jobGeneration_ = generation_;
     jobReady_ = true;
     busy_ = true;
   }
   workerCv_.notify_one();
 }
+
 void MainDock::workerLoop() {
+  CourseRecognizer courseRec;
   for (;;) {
     QImage image;
     std::vector<std::string> tags;
-    std::vector<TagSample> samples;
     uint64_t generation;
     QDateTime frameReceivedAt;
     {
@@ -579,7 +847,6 @@ void MainDock::workerLoop() {
         return;
       image = std::move(jobImage_);
       tags = jobTags_;
-      samples = jobSamples_;
       generation = jobGeneration_;
       frameReceivedAt = jobFrameReceivedAt_;
       jobReady_ = false;
@@ -588,8 +855,18 @@ void MainDock::workerLoop() {
     QElapsedTimer elapsed;
     elapsed.start();
     try {
-      result = analyzer_->read(image, tags, {}, false, true);
-      result = readFast(std::move(result), tags, samples);
+      QString courseName;
+      if (CourseRecognizer::isCourseScreen(image)) {
+        if (auto c = courseRec.recognize(image))
+          courseName = QString::fromStdString(*c);
+        result.standings.reserve(12);
+        result.evidence.resize(12);
+        for (int r = 0; r < 12; ++r)
+          result.standings.push_back({r + 1, {}, 0});
+      } else {
+        result = analyzer_->read(image, tags, {}, false, true);
+      }
+      result.detectedCourse = std::move(courseName);
     } catch (const std::exception &e) {
       result.error = QString::fromUtf8(e.what());
     }
@@ -602,6 +879,7 @@ void MainDock::workerLoop() {
         Qt::QueuedConnection);
   }
 }
+
 void MainDock::receiveAnalysis(Analysis result, uint64_t generation, qint64 duration,
                                QDateTime frameReceivedAt) {
   busy_ = false;
@@ -612,179 +890,215 @@ void MainDock::receiveAnalysis(Analysis result, uint64_t generation, qint64 dura
   latestFrameReceivedAt_ = frameReceivedAt;
   if (!latest_.error.isEmpty()) {
     const auto error = latest_.error;
-    startStop();
+    stopAggregation();
     setStatus(error, "#ff8a80");
     return;
   }
-  const int recognized = int(std::count_if(latest_.standings.begin(), latest_.standings.end(),
-                                           [](const auto &s) { return !s.tag.empty(); }));
+  const std::optional<std::string> courseObs =
+      latest_.detectedCourse.isEmpty()
+          ? std::nullopt
+          : std::optional<std::string>(latest_.detectedCourse.toStdString());
+  if (auto lockedCourse =
+          courseGate_.observe(courseObs, uint64_t(clock_.elapsed()), !reviewing_)) {
+    const QString course = QString::fromStdString(*lockedCourse);
+    currentCourse_ = course;
+    updateCourseDisplay();
+    updateScores();
+    blog(LOG_INFO, "[MK8DX QuickScore] detected course: %s", course.toUtf8().constData());
+    if (postDiscord_->isChecked() && course != lastSentCourse_)
+      syncDiscordCourse(course);
+  }
   diagnostic_->setText(
-      tr("映像 %1×%2 → 1920×1080 ｜ 順位 %3/12 ｜ 加点記号 %4/12 ｜ タグ %5/12 ｜ %6 ms")
+      tr("%1×%2 ｜ 順位%3/12 ｜ 加点%4/12 ｜ %5ms")
           .arg(latestImage_.width())
           .arg(latestImage_.height())
           .arg(latest_.layout.anchors)
           .arg(latest_.layout.pluses)
-          .arg(recognized)
           .arg(duration));
-  {
-    const bool agreed = stableNames_.isNull() || namesAgree(stableNames_, latest_.image);
-    stableNames_ = latest_.complete() ? latest_.image : QImage{};
-    const bool stable = gate_.observe(latest_.layout.visible, latest_.complete(),
-                                      agreed ? "decision" : "", uint64_t(clock_.elapsed()));
-    if (requestCycle_ != gate_.cycle()) {
 
-      // Warm-up spans the initial non-result screen; only cancel a live read.
-      if (api_->ready() && api_->busy())
-        api_->cancel();
-      requestIssued_ = false;
-      requestCycle_ = gate_.cycle();
+  if (reviewing_ && editMode_ == EditMode::CumulativeReconcile && !userTouchedReview_ &&
+      latest_.complete()) {
+    cancelReview();
+  }
+  const bool ready = latest_.complete();
+  if (ready) {
+    courseGate_.reset();
+    lastSentCourse_.clear();
+  }
+  const bool immediate = ready && latest_.finished_in_twelfth;
+  const bool stable = gate_.observe(latest_.layout.visible, ready, ready ? "decision" : "",
+                                    uint64_t(clock_.elapsed()), immediate);
+  if (requestCycle_ != gate_.cycle()) {
+    standingsRequestActive_ = false;
+    requestIssued_ = false;
+    requestCycle_ = gate_.cycle();
+  }
+  const bool readerBusy = api_->busy();
+  if (readerBusy) {
+    setStatus(tr("リザルトを判定しています。停止で中断できます。"));
+  } else if (stable && !requestIssued_) {
+    standingsStableCount_ = 0;
+    standingsLastTotal_ = -1;
+    requestRecognition(latest_);
+  } else if (!reviewing_ && !latest_.complete() && latest_.isCumulativeStandings()) {
+    const int impliedRaces = latest_.cumulativeScores.impliedRaceCount();
+    const int totalPts = latest_.cumulativeScores.totalPoints;
+    const int effRaces = int(session_.effectiveRaceCount());
+    const bool hasOffset = session_.inGameScoreOffset() > 0;
+    const int expectedOffsetTotal = 82 * effRaces - session_.inGameScoreOffset();
+    const bool needForPending1R =
+        !hasOffset && session_.hasPendingFirstRace() && impliedRaces == effRaces;
+    const bool needForLateStartFallback =
+        !hasOffset && !session_.hasPendingFirstRace() && session_.races().size() == 1 &&
+        session_.races()[0].raceSpan == 1 && !session_.races()[0].corrected &&
+        impliedRaces >= 2 && verifiedRaceCount_ < impliedRaces;
+    const bool needForAudit = !hasOffset && !session_.hasPendingFirstRace() &&
+                              !session_.races().empty() && impliedRaces == effRaces &&
+                              verifiedRaceCount_ < impliedRaces;
+    if (hasOffset && !session_.hasPendingFirstRace() && !session_.races().empty() &&
+        totalPts == expectedOffsetTotal && verifiedRaceCount_ < effRaces) {
+      verifiedRaceCount_ = effRaces;
+      setStatus(tr("第%1レース 総合得点一致（回線落ち・部屋落ち補正済み: ゲーム内 %2点 / 累計 %3点）")
+                    .arg(effRaces)
+                    .arg(totalPts)
+                    .arg(82 * effRaces));
+    } else if ((needForPending1R || needForLateStartFallback || needForAudit) &&
+               (standingsCheckedRace_ != impliedRaces || standingsCheckedTotal_ != totalPts)) {
+      std::array<int, 12> currentRows{};
+      for (int r = 0; r < 12; ++r)
+        currentRows[size_t(r)] = latest_.cumulativeScores.rows[size_t(r)].points;
+      if (standingsLastTotal_ == totalPts && standingsStableRows_ == currentRows) {
+        ++standingsStableCount_;
+      } else {
+        standingsLastTotal_ = totalPts;
+        standingsStableRows_ = currentRows;
+        standingsStableCount_ = 1;
+        standingsFirstMs_ = clock_.elapsed();
+      }
+      if (standingsStableCount_ >= 2 && clock_.elapsed() - standingsFirstMs_ >= 120) {
+        standingsStableCount_ = 0;
+        requestStandingsVerification(latest_);
+      } else {
+        setStatus(tr("総合順位表（第%1レース）を検算待機中。").arg(impliedRaces));
+      }
     }
-    const bool readerBusy = api_->busy();
-    manual_->setEnabled(latest_.complete() && !gate_.locked() && !readerBusy);
-    if (readerBusy) {
-      setStatus(tr("Jev APIの応答を待っています。停止で中断できます。"));
-    } else if (stable && !requestIssued_) {
-      requestRecognition(latest_);
-    } else if (gate_.locked()) {
-      setStatus(tr("このリザルトは処理済みです。次のレースを待機中。"));
-    } else if (!gate_.armed()) {
-      setStatus(tr("開始準備：リザルト以外を3秒映すか「現在のリザルトを確認」を押してください。"));
-    } else if (!latest_.layout.visible) {
-      setStatus(tr("リザルト待機中。順位の枠を画像照合しています。"));
-    } else {
-      setStatus(tr("リザルトと先頭文字の画像が安定するまで待機中（12順位・加点記号が必要）。"));
-    }
-    return;
+  } else if (gate_.locked()) {
+    standingsStableCount_ = 0;
+    setStatus(tr("このリザルトは処理済みです。次のレースを待機中。"));
+  } else if (!gate_.armed()) {
+    standingsStableCount_ = 0;
+    setStatus(tr("開始準備：リザルト以外を3秒映すか「現在のリザルトを確認」を押してください。"));
+  } else if (!latest_.layout.visible) {
+    standingsStableCount_ = 0;
+    setStatus(tr("リザルト待機中。"));
+  } else {
+    setStatus(tr("リザルトの安定を待機中（12順位・加点記号を確認しています）。"));
   }
 }
-void MainDock::requestJevAssistance() {
-  if (!running_ || !reviewing_ || pending_.image.isNull() || api_->busy())
+
+void MainDock::requestRetryRecognition() {
+  if (!reviewing_ || pending_.image.isNull() || api_->busy())
+    return;
+  const bool offlineEdit =
+      (editMode_ == EditMode::ExistingRace || editMode_ == EditMode::PendingFirstRace);
+  if (!running_ && !offlineEdit)
     return;
   const auto configurationError = api_->configurationError();
   if (!configurationError.isEmpty()) {
-    setStatus(tr("Jev APIキーが未設定です。集計停止後にAPIキーを保存してください。"), "#ffb74d");
+    setStatus(configurationError, "#ffb74d");
     return;
   }
   const auto generation = generation_;
   const auto captured = pending_;
-  jevAssist_->setEnabled(false);
+  const auto mode = editMode_;
+  const int editIdx = editingRaceIndex_;
+  retryRead_->setEnabled(false);
   confirm_->setEnabled(false);
-  correction_->setEnabled(false);
-  auto complete = [this, generation](Analysis result) {
-    if (!running_ || !reviewing_ || generation != generation_)
+  preview_->setEnabled(false);
+  setStatus(tr("リザルトを再判定しています。"));
+  const auto manualSelections = currentEditorStandings();
+  api_->read(captured, session_.tags(),
+             [this, generation, mode, editIdx, manualSelections](Analysis result) {
+    if (!reviewing_ || generation != generation_)
       return;
-    // Preserve choices the user had already made before asking for assistance.
+    applyPlayerOverrides(result, playerOverrides_, session_.tags());
     for (int row = 0; row < 12 && size_t(row) < result.standings.size(); ++row) {
-      const auto *box = qobject_cast<QComboBox *>(correction_->cellWidget(row, 2));
-      const auto selected = box->currentData().toString();
-      if (!selected.isEmpty()) {
-        result.standings[size_t(row)].tag = selected.toStdString();
+      if (size_t(row) < manualSelections.size() && !manualSelections[size_t(row)].tag.empty()) {
+        result.standings[size_t(row)].tag = manualSelections[size_t(row)].tag;
         result.standings[size_t(row)].confidence = 1;
       }
     }
+    enforceTwelfthFinishNotice(result, session_.tags());
+    if (session_.hasAutoConfirmedRace())
+      resolveSingleDeficitRow(result, session_.tags(), session_.playersPerTeam());
     api_->cancel();
     confirm_->setEnabled(true);
-    correction_->setEnabled(true);
-    jevAssist_->setEnabled(true);
-    review(result);
-    setStatus(
-        result.error.isEmpty()
-            ? tr("Jev APIの判定が完了しました。12人のチームを確認して見本を登録してください。")
-            : result.error + tr(" 手動でチームを選択できます。"),
-        "#ffb74d");
-  };
-  auto read = [this, generation, captured, complete](QString error) mutable {
-    if (!running_ || !reviewing_ || generation != generation_)
-      return;
-    if (!error.isEmpty()) {
-      auto failed = captured;
-      failed.error = error;
-      complete(std::move(failed));
-      return;
-    }
-    setStatus(tr("保存した名前画像をJev APIで判定しています。"));
-    api_->read(captured, session_.tags(), std::move(complete));
-  };
-  if (api_->ready())
-    read({});
-  else {
-    setStatus(tr("Jev APIへ接続しています。"));
-    api_->prepare(std::move(read));
-  }
+    preview_->setEnabled(true);
+    retryRead_->setEnabled(true);
+    result.cumulativeScores = pending_.cumulativeScores;
+    review(result, mode, editIdx);
+    setStatus(result.error.isEmpty()
+                  ? tr("再判定が完了しました。右側バッジを確認して確定してください。")
+                  : result.error + tr(" 右側のバッジからチームを選択できます。"),
+              "#ffb74d");
+  });
 }
+
 void MainDock::requestRecognition(const Analysis &captured) {
   if (!running_ || reviewing_ || api_->busy() || requestIssued_ || !captured.complete())
     return;
   requestIssued_ = true;
   requestCycle_ = gate_.cycle();
-  gate_.lock(); // Reserve before saving and inference; failures never cause an automatic retry.
-  manual_->setEnabled(false);
+  gate_.lock();
   const auto generation = generation_;
-  const auto cycle = requestCycle_;
   const auto requestedAt = clock_.elapsed();
   QJsonArray tags;
   for (const auto &tag : session_.tags())
     tags.append(QString::fromStdString(tag));
   const auto capture = saveResultCapture(
       QDir(configDirectory_).absoluteFilePath("captures"), captured.image,
-      QJsonObject{{"version", "0.8.1"},
+      QJsonObject{{"version", QUICKSCORE_VERSION},
                   {"source", source_->currentText()},
                   {"frameReceivedAt", latestFrameReceivedAt_.toString(Qt::ISODateWithMs)},
-                  {"format", format_->currentText()},
+                  {"format", formatNameForPlayers(session_.playersPerTeam())},
                   {"tags", tags},
                   {"anchors", captured.layout.anchors},
                   {"pluses", captured.layout.pluses}});
   resultCapture_ = capture.files;
   if (capture.error.isEmpty()) {
-    captureStatus_->setText(
-        tr("判定に使うリザルト画像を保存しました。未確定・スキップ時も残ります。"));
-    captureStatus_->setStyleSheet({});
-    captureStatus_->setToolTip(QDir::toNativeSeparators(capture.files["fullFrame"].toString()));
     blog(LOG_INFO, "[MK8DX QuickScore] saved result frame in %lld ms: %s",
          static_cast<long long>(capture.durationMs),
          capture.files["fullFrame"].toString().toUtf8().constData());
   } else {
     resultCapture_.insert("error", capture.error);
-    captureStatus_->setText(
-        tr("画像の自動保存に失敗しました。判定は続けます。\n%1").arg(capture.error));
-    captureStatus_->setStyleSheet("color:#ffb74d;");
-    captureStatus_->setToolTip({});
     blog(LOG_WARNING, "[MK8DX QuickScore] result image save failed: %s",
          capture.error.toUtf8().constData());
   }
-  const bool useApi = apiEnabled_->isChecked();
-  const QString readerName = useApi ? tr("Jev API") : tr("画像照合");
-  auto completion = [this, generation, cycle, requestedAt, readerName, captured,
-                     useApi](Analysis result) {
-    if (!running_ || generation != generation_ || cycle != gate_.cycle())
+
+  auto completion = [this, generation, requestedAt, captured](Analysis result) {
+    if (!running_ || generation != generation_)
       return;
-    const auto current =
-        latestImage_.scaled(1920, 1080, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
-            .convertToFormat(QImage::Format_ARGB32);
-    if (!namesAgree(captured.image, current)) {
-      result.error = tr("判定中に名前の画像が変化しました。下の結果を手動で確認してください。");
-      for (auto &standing : result.standings) {
-        standing.tag.clear();
-        standing.confidence = 0;
-      }
-    }
-    if (useApi) {
-      resultCapture_.insert("apiModel", api_->lastModel);
-      resultCapture_.insert("apiUsage", api_->lastUsage);
-    }
+    applyPlayerOverrides(result, playerOverrides_, session_.tags());
+    enforceTwelfthFinishNotice(result, session_.tags());
+    if (session_.hasAutoConfirmedRace())
+      resolveSingleDeficitRow(result, session_.tags(), session_.playersPerTeam());
+    resultCapture_.insert("apiModel", api_->lastModel);
+    resultCapture_.insert("apiUsage", api_->lastUsage);
     latest_ = std::move(result);
     const auto recognized =
         std::count_if(latest_.standings.begin(), latest_.standings.end(),
                       [](const Standing &standing) { return !standing.tag.empty(); });
-    diagnostic_->setText(tr("%1 ｜ 順位 12/12 ｜ 先頭文字の一致 %2/12 ｜ %3 ms")
-                             .arg(readerName)
+    diagnostic_->setText(tr("判定 12/12 ｜ 一致 %1/12 ｜ %2ms")
                              .arg(recognized)
                              .arg(clock_.elapsed() - requestedAt));
     const QString error = latest_.error;
     const auto validation = session_.validate(latest_.standings);
-    if (error.isEmpty() && validation.ok && autoCommit_->isChecked()) {
-      if (commit(latest_.standings, false, latest_)) {
-        setStatus(tr("%1の先頭文字・12順位・チーム人数を検証し集計しました。").arg(readerName));
+    if (error.isEmpty() && validation.ok) {
+      QString eventNote;
+      if (commit(latest_.standings, false, latest_, &eventNote)) {
+        if (!checkAutoFinish(false))
+          setStatus(eventNote.isEmpty() ? tr("12順位・チーム人数を検証し自動集計しました。")
+                                        : eventNote);
         return;
       }
       const auto storageError = status_->text();
@@ -793,86 +1107,337 @@ void MainDock::requestRecognition(const Analysis &captured) {
                 "#ff8a80");
       return;
     }
+    const StandingsScoreRead preScores = readCumulativeScores(captured.image);
+    const bool looksLikeRace1 = (preScores.validRows < 12 || preScores.totalPoints == 0);
+    if (looksLikeRace1 && session_.races().empty() && !session_.hasPendingFirstRace()) {
+      Session proposed = session_;
+      proposed.deferFirstRace(latest_.standings, currentCourse_.toStdString());
+      pendingFirstAudit_ = QJsonObject{
+          {"race", 1},
+          {"capturedAt", resultCapture_["frameReceivedAt"].toString(
+                             QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))},
+          {"capture", resultCapture_},
+          {"raw", evidenceJson(latest_)}};
+      QString saveError;
+      if (storeSession(configDirectory_ + "/session.json", proposed, audit_, saveError)) {
+        session_ = std::move(proposed);
+        currentCourse_.clear();
+        lastSentCourse_.clear();
+        courseGate_.reset();
+        updateCourseDisplay();
+        lastCommittedFrame_ = captured.image;
+        lastCommittedStandings_ = latest_.standings;
+        updateScores();
+        refreshRaceHistory();
+        updatePreview(captured.image, latest_.standings);
+        setStatus(tr("1レース目で未一致・エラーがあったため保留しました（名前修正待ち）。2レース"
+                     "目以降を継続し、名前が直り次第 総合順位表から自動回収します。"),
+                  "#ffb74d");
+        return;
+      }
+    }
     review(latest_);
     if (!error.isEmpty())
       setStatus(error + tr(" 下の12人のチームを選び「確認した内容で集計」を押してください。"),
                 "#ffb74d");
-    else if (!validation.ok)
+    else
       setStatus(tr("読み取れない文字またはチーム人数の不一致があります。下の結果を確認してくだ"
                    "さい。"),
                 "#ffb74d");
-    else
-      setStatus(tr("%1の判定が完了しました。下の先頭文字とチームを確認して集計してください。")
-                    .arg(readerName));
   };
-  if (useApi) {
-    setStatus(tr("Jev APIで12人の先頭文字を判定中です。停止で中断できます。"));
-    api_->read(captured, session_.tags(), std::move(completion));
-  } else
-    completion(captured);
+
+  setStatus(tr("12人のチームを判定中です。停止で中断できます。"));
+  api_->read(captured, session_.tags(), std::move(completion));
 }
-void MainDock::review(const Analysis &analysis) {
+
+void MainDock::requestStandingsVerification(const Analysis &captured) {
+  if (!running_ || reviewing_ || api_->busy() || !captured.isCumulativeStandings())
+    return;
+  const int impliedRaces = captured.cumulativeScores.impliedRaceCount();
+  const int totalPts = captured.cumulativeScores.totalPoints;
+  standingsCheckedRace_ = impliedRaces;
+  standingsCheckedTotal_ = totalPts;
+  standingsRequestActive_ = true;
+  const auto generation = generation_;
+
+  auto completion = [this, generation, captured, impliedRaces](Analysis result) {
+    standingsRequestActive_ = false;
+    if (!running_ || reviewing_ || generation != generation_)
+      return;
+    result.cumulativeScores = captured.cumulativeScores;
+    applyPlayerOverrides(result, playerOverrides_, session_.tags());
+    const auto validation = session_.validate(result.standings);
+    if (!result.error.isEmpty() || !validation.ok) {
+      review(result, EditMode::CumulativeReconcile, impliedRaces);
+      setStatus(tr("総合順位表の検算で曖昧な行があります。確認して反映するかスキップしてくださ"
+                   "い（次のレースで自動待機します）。"),
+                "#ffb74d");
+      return;
+    }
+
+    std::map<std::string, int> gameTeamTotal;
+    for (const auto &t : session_.tags())
+      gameTeamTotal[t] = 0;
+    for (int row = 0; row < 12; ++row)
+      gameTeamTotal[result.standings[size_t(row)].tag] +=
+          captured.cumulativeScores.rows[size_t(row)].points;
+
+    Session proposed = session_;
+    bool changed = false;
+    if (!proposed.reconcileWithCumulativeTotals(gameTeamTotal, impliedRaces, &changed))
+      return;
+
+    auto audit = audit_;
+    const bool prependedRace = proposed.races().size() > session_.races().size();
+    const bool recoveredPending1R = prependedRace && session_.hasPendingFirstRace();
+    if (prependedRace) {
+      QJsonObject entry = recoveredPending1R
+                              ? pendingFirstAudit_
+                              : QJsonObject{{"raceSpan", proposed.races().front().raceSpan},
+                                            {"label", QString::fromStdString(
+                                                          proposed.races().front().label)}};
+      if (entry.isEmpty())
+        entry = QJsonObject{{"race", proposed.races().front().number}};
+      entry.insert("corrected", true);
+      entry.insert("reconciledAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+      audit.prepend(entry);
+      int nextAuditRace = 1;
+      for (int i = 0; i < audit.size(); ++i) {
+        auto obj = audit[i].toObject();
+        const int span = std::max(1, obj.value("raceSpan").toInt(1));
+        nextAuditRace += span - 1;
+        obj.insert("race", nextAuditRace);
+        ++nextAuditRace;
+        audit[i] = obj;
+      }
+    }
+
+    QString error;
+    if (!storeSession(configDirectory_ + "/session.json", proposed, audit, error)) {
+      setStatus(tr("検算結果の保存に失敗しました: %1").arg(error), "#ff8a80");
+      return;
+    }
+    session_ = std::move(proposed);
+    audit_ = audit;
+    if (recoveredPending1R)
+      pendingFirstAudit_ = {};
+    verifiedRaceCount_ = impliedRaces;
+    lastCommittedFrame_ = captured.image;
+    lastCommittedStandings_ = result.standings;
+    updateScores();
+    refreshRaceHistory();
+    updatePreview(captured.image, result.standings);
+    const bool autoFinished = checkAutoFinish(false);
+    if ((changed || prependedRace || autoFinished) && postDiscord_->isChecked())
+      syncDiscord(changed || prependedRace);
+    if (!autoFinished) {
+      if (recoveredPending1R)
+        setStatus(
+            tr("総合順位表から1レース目を逆算・自動回収し、第%1レースまで同期しました。")
+                .arg(impliedRaces));
+      else if (prependedRace)
+        setStatus(tr("総合順位表から途中開始前の合計点（%1）を補完し、第%2レースまで同期しました。")
+                      .arg(QString::fromStdString(session_.races().front().label))
+                      .arg(impliedRaces));
+      else if (changed)
+        setStatus(tr("総合順位表で検算し、序盤のズレを自動補正しました（第%1レース時点）。")
+                      .arg(impliedRaces));
+      else
+        setStatus(tr("第%1レース 総合順位表の検算OK（ゲーム内合計と完全一致）。").arg(impliedRaces));
+    }
+  };
+
+  setStatus(tr("総合順位表（第%1レース）を検算中です。").arg(impliedRaces));
+  api_->read(captured, session_.tags(), std::move(completion));
+}
+
+void MainDock::review(const Analysis &analysis, EditMode mode, int raceIndex) {
   if (analysis.standings.size() != 12)
     return;
   ++generation_;
   pending_ = analysis;
   reviewing_ = true;
-  preview_->setPixmap(QPixmap::fromImage(pending_.image)
-                          .scaled(480, 270, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-  manual_->setEnabled(false);
-  const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
-  for (int row = 0; row < 12; ++row) {
-    correction_->setItem(row, 0, new QTableWidgetItem(QString::number(row + 1)));
-    auto *label = new QLabel;
-    correction_->setCellWidget(row, 1, label);
-    auto *box = new QComboBox;
-    box->addItem(tr("未選択"), QString{});
-    for (const auto &t : activeTags)
-      box->addItem(QString::fromStdString(t), QString::fromStdString(t));
+  editMode_ = mode;
+  editingRaceIndex_ = raceIndex;
+  userTouchedReview_ = false;
+  if (raceSelector_)
+    raceSelector_->setEnabled(false);
+  if (editRace_)
+    editRace_->setEnabled(false);
 
-    // Unknown rows remain unselected; team capacity is validation, never evidence.
-    std::string selectTag = pending_.standings[size_t(row)].tag;
-    int idx = box->findData(QString::fromStdString(selectTag));
-    box->setCurrentIndex(std::max(0, idx));
-    correction_->setCellWidget(row, 2, box);
-    correction_->setRowHeight(row, 42);
-    updateRowPreview(row);
+  const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
+  reviewBaselineStandings_ = pending_.standings;
+  preview_->setPreview(pending_.image, pending_.standings, activeTags, pending_.evidence,
+                       pending_.cumulativeScores);
+  preview_->setEditing(true, mode == EditMode::CumulativeReconcile);
+
+  if (mode == EditMode::ExistingRace || mode == EditMode::PendingFirstRace) {
+    confirm_->setText(tr("修正を保存"));
+    cancel_->setText(tr("キャンセル"));
+  } else if (mode == EditMode::CumulativeReconcile) {
+    confirm_->setText(tr("総合で検算"));
+    cancel_->setText(tr("スキップ"));
+    setStatus(tr("総合順位表（%1R）の右バッジを確認して検算してください。").arg(raceIndex),
+              "#ffb74d");
+  } else {
+    confirm_->setText(tr("確定して集計"));
+    cancel_->setText(tr("スキップ"));
   }
-  correction_->setColumnWidth(0, 40);
-  correction_->setColumnWidth(2, 90);
-  for (auto *w :
-       std::initializer_list<QWidget *>{correction_, reviewHelp_, confirm_, cancel_, jevAssist_})
+  for (auto *w : std::initializer_list<QWidget *>{confirm_, cancel_, retryRead_})
     w->show();
-  setStatus(tr("名前の先頭文字と12人のチームを確認して集計してください。"), "#ffb74d");
+  reviewHelp_->hide();
+  if (mode == EditMode::ExistingRace || mode == EditMode::PendingFirstRace) {
+    retryRead_->setVisible(!pending_.image.isNull() && api_->configurationError().isEmpty());
+  }
+  if (mode == EditMode::NewRace)
+    setStatus(tr("右バッジでチーム確認（次レース以降に自動学習）"), "#ffb74d");
+  else if (mode == EditMode::ExistingRace || mode == EditMode::PendingFirstRace)
+    setStatus(tr("右バッジ変更 →「修正を保存」（自動学習あり）"));
 }
-void MainDock::updateRowPreview(int row) {
-  auto *label = qobject_cast<QLabel *>(correction_->cellWidget(row, 1));
-  if (!label)
+
+std::vector<Standing> MainDock::currentEditorStandings() const {
+  auto out = preview_->standings();
+  if (out.size() != 12) {
+    out.clear();
+    out.reserve(12);
+    for (int row = 0; row < 12; ++row)
+      out.push_back({row + 1, preview_->rowTag(row).toStdString(), 1.0});
+  }
+  return out;
+}
+
+void MainDock::learnOverridesFromReview(const std::vector<Standing> &confirmed) {
+  if (pending_.image.isNull() || confirmed.size() != 12)
     return;
-  QImage image = Analyzer::rowImage(pending_.image, row);
-  label->setPixmap(
-      QPixmap::fromImage(image).scaled(300, 38, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-  if (size_t(row) < pending_.evidence.size()) {
-    const auto &ev = pending_.evidence[size_t(row)];
-    QString tip = ev.method;
-    if (!ev.text.isEmpty())
-      tip += "\n読み取り: " + ev.text;
-    if (!ev.closestTag.empty())
-      tip += QString("\n推定候補: %1 (%2%)")
-                 .arg(QString::fromStdString(ev.closestTag))
-                 .arg(int(ev.closestScore * 100));
-    label->setToolTip(tip);
+  bool updated = false;
+  for (int row = 0; row < 12; ++row) {
+    const std::string &tag = confirmed[size_t(row)].tag;
+    if (tag.empty())
+      continue;
+    if (size_t(row) < pending_.evidence.size() &&
+        (pending_.evidence[size_t(row)].method == QStringLiteral("欠員・CPU自動補完") ||
+         pending_.evidence[size_t(row)].method == QStringLiteral("自チーム12位確定通知")))
+      continue;
+    const std::string prevTag =
+        size_t(row) < reviewBaselineStandings_.size() ? reviewBaselineStandings_[size_t(row)].tag
+                                                      : std::string{};
+    if (tag == prevTag)
+      continue;
+    const QImage patch = extractPlayerNamePatch(pending_.image, row);
+    if (patch.isNull())
+      continue;
+    bool replacedExisting = false;
+    for (auto &ov : playerOverrides_) {
+      if (matchPlayerNameEdge(pending_.image, row, ov.patch) >= 0.85) {
+        ov.tag = tag;
+        ov.patch = patch;
+        replacedExisting = true;
+        updated = true;
+        break;
+      }
+    }
+    if (!replacedExisting) {
+      if (playerOverrides_.size() >= 36)
+        playerOverrides_.erase(playerOverrides_.begin());
+      playerOverrides_.push_back(TagSample{tag, patch});
+      updated = true;
+    }
+  }
+  if (updated && !configDirectory_.isEmpty()) {
+    QString err;
+    if (!saveSamples(configDirectory_ + "/player-overrides.json", playerOverrides_, err)) {
+      blog(LOG_WARNING, "[MK8DX QuickScore] failed to save player overrides: %s",
+           err.toUtf8().constData());
+    }
   }
 }
+
+void MainDock::refreshRaceHistory() {
+  if (!raceSelector_ || !editRace_)
+    return;
+  const int prevData = raceSelector_->count() > 0 ? raceSelector_->currentData().toInt() : -99;
+  raceSelector_->clear();
+  if (session_.hasPendingFirstRace())
+    raceSelector_->addItem(tr("1R (未確定・名前待ち)"), -1);
+  const auto &races = session_.races();
+  for (size_t i = 0; i < races.size(); ++i) {
+    QString text = races[i].label.empty() ? tr("%1R").arg(races[i].number)
+                                          : QString::fromStdString(races[i].label);
+    if (races[i].corrected && races[i].raceSpan <= 1)
+      text += tr(" (補正済み)");
+    raceSelector_->addItem(text, int(i));
+  }
+  if (raceSelector_->count() == 0) {
+    raceSelector_->addItem(tr("確定レースなし"), -99);
+    raceSelector_->setEnabled(false);
+    editRace_->setEnabled(false);
+    return;
+  }
+  int restoreIdx = raceSelector_->findData(prevData);
+  raceSelector_->setCurrentIndex(restoreIdx >= 0 ? restoreIdx : raceSelector_->count() - 1);
+  raceSelector_->setEnabled(!reviewing_);
+  editRace_->setEnabled(!reviewing_);
+}
+
+void MainDock::openSelectedRaceEditor() {
+  if (reviewing_ || !raceSelector_)
+    return;
+  const int data = raceSelector_->currentData().toInt();
+  if (data == -99)
+    return;
+  Analysis loaded;
+  if (data == -1 && session_.hasPendingFirstRace()) {
+    loaded.standings = session_.pendingFirstRaceStandings();
+    if (loaded.standings.size() != 12) {
+      loaded.standings.clear();
+      for (int r = 0; r < 12; ++r)
+        loaded.standings.push_back({r + 1, {}, 0.0});
+    }
+    const QString fullPath =
+        pendingFirstAudit_.value("capture").toObject().value("fullFrame").toString();
+    if (!fullPath.isEmpty())
+      loaded.image = QImage(fullPath);
+    if (loaded.image.isNull() && !lastCommittedFrame_.isNull())
+      loaded.image = lastCommittedFrame_;
+    if (loaded.image.isNull()) {
+      loaded.image = QImage(1920, 1080, QImage::Format_ARGB32);
+      loaded.image.fill(QColor(24, 28, 34));
+    }
+    review(loaded, EditMode::PendingFirstRace, -1);
+    return;
+  }
+  if (data < 0 || size_t(data) >= session_.races().size())
+    return;
+  const auto &race = session_.races()[size_t(data)];
+  if (race.raceSpan > 1) {
+    QMessageBox::information(this, tr("修正不可"),
+                             tr("途中開始時に取り込んだ合計（%1）は個別の12人順位を持たないため編集対象外です。")
+                                 .arg(QString::fromStdString(race.label)));
+    return;
+  }
+  loaded.standings = race.standings;
+  if (loaded.standings.size() != 12) {
+    loaded.standings.clear();
+    for (int r = 0; r < 12; ++r)
+      loaded.standings.push_back({r + 1, {}, 0.0});
+  }
+  if (data < audit_.size()) {
+    const QString fullPath =
+        audit_[data].toObject().value("capture").toObject().value("fullFrame").toString();
+    if (!fullPath.isEmpty())
+      loaded.image = QImage(fullPath);
+  }
+  if (loaded.image.isNull()) {
+    loaded.image = QImage(1920, 1080, QImage::Format_ARGB32);
+    loaded.image.fill(QColor(24, 28, 34));
+  }
+  review(loaded, EditMode::ExistingRace, data);
+}
+
 void MainDock::confirmPending() {
   if (!reviewing_ || pending_.standings.size() != 12)
     return;
-  auto standings = pending_.standings;
-  for (int row = 0; row < 12; ++row) {
-    const auto *box = qobject_cast<QComboBox *>(correction_->cellWidget(row, 2));
-    standings[size_t(row)].tag = box->currentData().toString().toStdString();
-    standings[size_t(row)].confidence = 1;
-  }
+  auto standings = currentEditorStandings();
   const auto validation = session_.validate(standings);
   if (!validation.ok) {
     QStringList errors;
@@ -881,32 +1446,228 @@ void MainDock::confirmPending() {
     QMessageBox::warning(this, tr("確認してください"), errors.join("\n"));
     return;
   }
-  if (!commit(standings, true, pending_))
+
+  if (editMode_ == EditMode::ExistingRace) {
+    const int editIdx = editingRaceIndex_;
+    Session proposed = session_;
+    if (editIdx < 0 || !proposed.replaceRace(size_t(editIdx), standings, true))
+      return;
+    const int raceNumber = proposed.races()[size_t(editIdx)].number;
+    auto audit = audit_;
+    if (editIdx < audit.size()) {
+      auto obj = audit[editIdx].toObject();
+      obj.insert("corrected", true);
+      obj.insert("editedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+      audit[editIdx] = obj;
+    }
+    QString error;
+    if (!storeSession(configDirectory_ + "/session.json", proposed, audit, error)) {
+      setStatus(tr("保存できません: %1").arg(error), "#ff8a80");
+      return;
+    }
+    session_ = std::move(proposed);
+    audit_ = audit;
+    const QImage img = pending_.image;
+    learnOverridesFromReview(standings);
+    cancelReview();
+    lastCommittedFrame_ = img;
+    lastCommittedStandings_ = standings;
+    updateScores();
+    refreshRaceHistory();
+    updatePreview(img, standings);
+    if (postDiscord_->isChecked())
+      syncDiscord();
+    setStatus(tr("第%1レースの修正を保存し再集計しました。").arg(raceNumber));
     return;
+  }
+
+  if (editMode_ == EditMode::PendingFirstRace) {
+    Session proposed = session_;
+    if (!proposed.resolvePendingFirstRaceManually(standings, true))
+      return;
+    auto audit = audit_;
+    QJsonObject entry = pendingFirstAudit_;
+    if (entry.isEmpty())
+      entry = QJsonObject{{"race", 1}};
+    entry.insert("corrected", true);
+    entry.insert("committedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    audit.prepend(entry);
+    for (int i = 0; i < audit.size(); ++i) {
+      auto obj = audit[i].toObject();
+      obj.insert("race", i + 1);
+      audit[i] = obj;
+    }
+    QString error;
+    if (!storeSession(configDirectory_ + "/session.json", proposed, audit, error)) {
+      setStatus(tr("保存できません: %1").arg(error), "#ff8a80");
+      return;
+    }
+    session_ = std::move(proposed);
+    audit_ = audit;
+    pendingFirstAudit_ = {};
+    const QImage img = pending_.image;
+    learnOverridesFromReview(standings);
+    cancelReview();
+    lastCommittedFrame_ = img;
+    lastCommittedStandings_ = standings;
+    updateScores();
+    refreshRaceHistory();
+    updatePreview(img, standings);
+    const bool autoFinished = checkAutoFinish(false);
+    if (postDiscord_->isChecked())
+      syncDiscord();
+    if (!autoFinished)
+      setStatus(tr("1レース目を確定し全体の点数を再集計しました。"));
+    return;
+  }
+
+  if (editMode_ == EditMode::CumulativeReconcile) {
+    const int impliedRaces = editingRaceIndex_;
+    std::map<std::string, int> gameTeamTotal;
+    for (const auto &t : session_.tags())
+      gameTeamTotal[t] = 0;
+    for (int row = 0; row < 12; ++row)
+      gameTeamTotal[standings[size_t(row)].tag] +=
+          pending_.cumulativeScores.rows[size_t(row)].points;
+
+    Session proposed = session_;
+    bool changed = false;
+    if (!proposed.reconcileWithCumulativeTotals(gameTeamTotal, impliedRaces, &changed)) {
+      setStatus(tr("総合得点との整合性が取れないため反映できませんでした。"), "#ff8a80");
+      return;
+    }
+    auto audit = audit_;
+    const bool prependedRace = proposed.races().size() > session_.races().size();
+    const bool recoveredPending1R = prependedRace && session_.hasPendingFirstRace();
+    if (prependedRace) {
+      QJsonObject entry = recoveredPending1R
+                              ? pendingFirstAudit_
+                              : QJsonObject{{"raceSpan", proposed.races().front().raceSpan},
+                                            {"label", QString::fromStdString(
+                                                          proposed.races().front().label)}};
+      if (entry.isEmpty())
+        entry = QJsonObject{{"race", proposed.races().front().number}};
+      entry.insert("corrected", true);
+      entry.insert("reconciledAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+      audit.prepend(entry);
+      int nextAuditRace = 1;
+      for (int i = 0; i < audit.size(); ++i) {
+        auto obj = audit[i].toObject();
+        const int span = std::max(1, obj.value("raceSpan").toInt(1));
+        nextAuditRace += span - 1;
+        obj.insert("race", nextAuditRace);
+        ++nextAuditRace;
+        audit[i] = obj;
+      }
+    }
+    QString error;
+    if (!storeSession(configDirectory_ + "/session.json", proposed, audit, error)) {
+      setStatus(tr("保存できません: %1").arg(error), "#ff8a80");
+      return;
+    }
+    session_ = std::move(proposed);
+    audit_ = audit;
+    if (recoveredPending1R)
+      pendingFirstAudit_ = {};
+    verifiedRaceCount_ = impliedRaces;
+    const QImage img = pending_.image;
+    learnOverridesFromReview(standings);
+    cancelReview();
+    lastCommittedFrame_ = img;
+    lastCommittedStandings_ = standings;
+    updateScores();
+    refreshRaceHistory();
+    updatePreview(img, standings);
+    const bool autoFinished = checkAutoFinish(false);
+    if ((changed || prependedRace || autoFinished) && postDiscord_->isChecked())
+      syncDiscord(changed || prependedRace);
+    if (!autoFinished)
+      setStatus(tr("総合順位表（第%1レース）の検算結果を反映しました。").arg(impliedRaces));
+    return;
+  }
+
+  QString eventNote;
+  if (!commit(standings, true, pending_, &eventNote))
+    return;
+  learnOverridesFromReview(standings);
   gate_.lock();
   cancelReview();
-  setStatus(tr("確認済みの結果を集計しました。"));
+  if (!checkAutoFinish(false))
+    setStatus(eventNote.isEmpty() ? tr("確認済みの結果を集計しました。") : eventNote);
 }
+
 void MainDock::cancelReview() {
   ++generation_;
   if (api_->busy())
     api_->cancel();
   reviewing_ = false;
+  editMode_ = EditMode::None;
+  editingRaceIndex_ = -1;
+  userTouchedReview_ = false;
   pending_ = {};
+  reviewBaselineStandings_.clear();
+  preview_->setEditing(false);
+  preview_->setEnabled(true);
   confirm_->setEnabled(true);
-  correction_->setEnabled(true);
-  jevAssist_->setEnabled(true);
-  for (auto *w :
-       std::initializer_list<QWidget *>{correction_, reviewHelp_, confirm_, cancel_, jevAssist_})
+  retryRead_->setEnabled(true);
+  confirm_->setText(tr("確定して集計"));
+  cancel_->setText(tr("スキップ"));
+  reviewHelp_->setText(tr("右のバッジをクリックしてチームを選択してください。"));
+  for (auto *w : std::initializer_list<QWidget *>{reviewHelp_, confirm_, cancel_, retryRead_})
     w->hide();
+  refreshRaceHistory();
 }
-bool MainDock::commit(const std::vector<Standing> &standings, bool corrected, const Analysis &raw) {
+
+bool MainDock::commit(const std::vector<Standing> &standings, bool corrected, const Analysis &raw,
+                      QString *eventNote) {
   Session proposed = session_;
-  if (!proposed.commit(standings, corrected))
-    return false;
   auto audit = audit_;
+  QString note;
+
+  if (!raw.image.isNull() && standings.size() == 12) {
+    const StandingsScoreRead preScores = readCumulativeScores(raw.image);
+    if (preScores.validRows == 12) {
+      const int effBefore = int(proposed.effectiveRaceCount());
+      if (proposed.races().empty() && !proposed.hasPendingFirstRace()) {
+        if (preScores.totalPoints > 0 && (preScores.totalPoints % 82) == 0) {
+          const int priorRaces = preScores.totalPoints / 82;
+          std::map<std::string, int> priorTotals;
+          for (const auto &t : proposed.tags())
+            priorTotals[t] = 0;
+          for (size_t r = 0; r < 12; ++r)
+            priorTotals[standings[r].tag] += preScores.rows[r].points;
+          if (proposed.importPriorSummary(priorRaces, priorTotals)) {
+            const auto &summary = proposed.races().front();
+            audit.append(QJsonObject{
+                {"race", summary.number},
+                {"raceSpan", summary.raceSpan},
+                {"label", QString::fromStdString(summary.label)},
+                {"corrected", true},
+                {"importedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}});
+            note = tr("途中開始（%1）の総合点を自動取り込みし、第%2レースを集計しました。")
+                       .arg(QString::fromStdString(summary.label))
+                       .arg(priorRaces + 1);
+          }
+        }
+      } else if (effBefore >= 1) {
+        const int expectedPreSum = 82 * effBefore - proposed.inGameScoreOffset();
+        if (preScores.totalPoints == 0) {
+          proposed.setInGameScoreOffset(82 * effBefore);
+          note = tr("部屋落ち（全員0点リセット）を検出し、累計点を維持したまま集計しました。");
+        } else if (preScores.totalPoints < expectedPreSum) {
+          proposed.addInGameScoreOffset(expectedPreSum - preScores.totalPoints);
+          note = tr("回線落ち・復帰による0点リセットを検出し、累計点を維持して集計しました。");
+        }
+      }
+    }
+  }
+
+  const QString raceCourse = !raw.detectedCourse.isEmpty() ? raw.detectedCourse : currentCourse_;
+  if (!proposed.commit(standings, corrected, nullptr, raceCourse.toStdString()))
+    return false;
   audit.append(
-      QJsonObject{{"race", int(proposed.races().size())},
+      QJsonObject{{"race", int(proposed.effectiveRaceCount())},
+                  {"course", raceCourse},
                   {"capturedAt", resultCapture_["frameReceivedAt"].toString(
                                      QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))},
                   {"committedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
@@ -920,48 +1681,33 @@ bool MainDock::commit(const std::vector<Standing> &standings, bool corrected, co
   }
   session_ = std::move(proposed);
   audit_ = audit;
-  if (corrected)
-    learnConfirmed(raw, standings);
+  if (eventNote)
+    *eventNote = note;
+  currentCourse_.clear();
+  lastSentCourse_.clear();
+  courseGate_.reset();
+  updateCourseDisplay();
+  lastCommittedFrame_ = raw.image;
+  lastCommittedStandings_ = standings;
   updateScores();
+  refreshRaceHistory();
+  updatePreview(raw.image, standings);
+  if (running_ && session_.effectiveRaceCount() >= 12) {
+    loungeOverlayActive_ = true;
+    loungeOverlayUntilUtc_ = QDateTime::currentDateTimeUtc().addSecs(60);
+  }
+  if (postDiscord_->isChecked())
+    syncDiscord();
   return true;
 }
-void MainDock::undo() {
-  const bool invalidateSamples = !session_.races().empty() && session_.races().back().corrected;
-  Session proposed = session_;
-  if (!proposed.undo())
-    return;
-  auto audit = audit_;
-  if (!audit.isEmpty())
-    audit.removeLast();
-  QString error;
-  if (!storeSession(configDirectory_ + "/session.json", proposed, audit, error)) {
-    setStatus(error, "#ff8a80");
-    return;
-  }
-  session_ = std::move(proposed);
-  audit_ = audit;
-  if (invalidateSamples) {
-    // A correction may have undone a mistaken manual label; don't reuse its samples.
-    fastSamples_.clear();
-    fastSource_.clear();
-    ++generation_;
-    QString sampleError;
-    if (!saveSamples(configDirectory_ + "/fast-templates.json", fastSamples_, sampleError))
-      fastStatus_->setText(tr("見本の取り消しを保存できません: %1").arg(sampleError));
-    else
-      updateFastStatus();
-    saveSettings();
-  }
-  updateScores();
-  setStatus(tr("直前のレースを取り消しました。同じ画面の自動再加算はしません。"));
-}
+
 void MainDock::resetSession() {
   if (QMessageBox::question(this, tr("集計リセット"),
                             tr("現在の集計をバックアップしてリセットしますか？")) !=
       QMessageBox::Yes)
     return;
   if (running_)
-    startStop();
+    stopAggregation(false, false);
   const QString path = configDirectory_ + "/session.json";
   if (QFile::exists(path) &&
       !QFile::copy(path, path + "." +
@@ -971,7 +1717,8 @@ void MainDock::resetSession() {
     return;
   }
   Session empty;
-  empty.configure(configuredTags(), playersForFormat(format_->currentIndex()));
+  const int resetPlayers = configuredPlayersPerTeam();
+  empty.configure(configuredTags(), resetPlayers > 0 ? resetPlayers : 3);
   QString error;
   if (!storeSession(path, empty, {}, error)) {
     setStatus(error, "#ff8a80");
@@ -979,56 +1726,40 @@ void MainDock::resetSession() {
   }
   session_ = std::move(empty);
   audit_ = {};
+  pendingFirstAudit_ = {};
+  playerOverrides_.clear();
+  if (!configDirectory_.isEmpty())
+    QFile::remove(configDirectory_ + "/player-overrides.json");
+  verifiedRaceCount_ = 0;
+  standingsCheckedRace_ = -1;
+  standingsCheckedTotal_ = -1;
+  currentCourse_.clear();
+  lastSentCourse_.clear();
+  courseGate_.reset();
+  updateCourseDisplay();
+  lastCommittedFrame_ = {};
+  lastCommittedStandings_.clear();
   updateScores();
+  refreshRaceHistory();
+  loungeOverlayActive_ = false;
+  loungeOverlayUntilUtc_ = {};
+  if (postDiscord_->isChecked())
+    syncDiscord();
   setStatus(tr("集計をリセットしました。次のレースを待機します。"));
 }
-void MainDock::updateFastStatus() {
-  if (!fastStatus_)
+
+void MainDock::updateCourseDisplay() {
+  if (!courseLabel_)
     return;
-  const auto tags = configuredTags();
-  int learned = 0;
-  if (fastSource_ == source_->currentData().toString())
-    for (const auto &tag : tags)
-      if (std::any_of(fastSamples_.begin(), fastSamples_.end(), [&](const TagSample &sample) {
-            return initialIdentifier(QString::fromStdString(sample.tag)) ==
-                   initialIdentifier(QString::fromStdString(tag));
-          }))
-        ++learned;
-  fastStatus_->setText(
-      learned == int(tags.size()) && learned > 0
-          ? tr("%1チームの見本を登録済み。モデルの読み込みなしで画像照合します。\n"
-               "名前の変更や不鮮明な画像は、12人の確認画面で保留します。")
-                .arg(learned)
-          : tr("見本登録 %1/%2チーム。最初のリザルトで12人のチームを確認してください。\n"
-               "「確認した内容で集計」を押すと見本を保存し、次から画像照合で判定します。")
-                .arg(learned)
-                .arg(tags.size()));
+  courseLabel_->setText(
+      tr("現在コース：%1").arg(currentCourse_.isEmpty() ? tr("—") : currentCourse_));
 }
-void MainDock::learnConfirmed(const Analysis &raw, const std::vector<Standing> &standings) {
-  auto samples = confirmedSamples(raw.image, standings);
-  if (samples.empty())
-    return;
-  auto proposed =
-      fastSource_ == source_->currentData().toString() ? fastSamples_ : std::vector<TagSample>{};
-  proposed.insert(proposed.end(), samples.begin(), samples.end());
-  if (proposed.size() > 24)
-    proposed.erase(proposed.begin(), proposed.end() - 24);
-  QString error;
-  if (!saveSamples(configDirectory_ + "/fast-templates.json", proposed, error)) {
-    fastStatus_->setText(tr("集計済みですが、名前の見本を保存できません: %1").arg(error));
-    return;
-  }
-  fastSamples_ = std::move(proposed);
-  fastSource_ = source_->currentData().toString();
-  saveSettings();
-  updateFastStatus();
-}
+
 void MainDock::updateScores() {
   const auto totals = session_.totals();
   const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
-  const QString scoreLine = formatScoreLine(activeTags, totals, session_.races().size(), 12);
+  const QString scoreLine = formatScoreLine(activeTags, totals, session_.effectiveRaceCount(), 12);
   scores_->setText(scoreLine);
-  updateDiscord();
 
   {
     QFile file(configDirectory_ + "/score.txt");
@@ -1043,127 +1774,151 @@ void MainDock::updateScores() {
     }
   }
 
-  QImage image(1920, 64, QImage::Format_RGBA8888);
-  image.fill(Qt::transparent);
-  QPainter p(&image);
-  p.setRenderHint(QPainter::Antialiasing);
-  p.setRenderHint(QPainter::TextAntialiasing);
-  p.setBrush(QColor(15, 21, 31, 230));
-  p.setPen(Qt::NoPen);
-  p.drawRoundedRect(image.rect().adjusted(2, 2, -2, -2), 12, 12);
-
-  QFont font = p.font();
-  font.setPixelSize(28);
-  font.setBold(true);
-  p.setFont(font);
-  p.setPen(QColor(255, 255, 255));
-  p.drawText(QRect(20, 0, 1880, 64), Qt::AlignVCenter | Qt::AlignLeft, scoreLine);
-  p.end();
-
+  const OverlayState overlay = buildOverlayState(
+      activeTags, totals, session_.effectiveRaceCount(), 12, ++overlayRevision_);
+  const QImage image = renderOverlayImage(overlay);
   std::vector<uint8_t> pixels(image.constBits(),
                               image.constBits() + size_t(image.bytesPerLine() * image.height()));
   updateScoreboardImage(image.width(), image.height(), std::move(pixels));
-}
-void MainDock::saveSettings() {
-  QSettings s(configDirectory_ + "/settings.ini", QSettings::IniFormat);
-  s.setValue("schema", 9);
-  s.setValue("sourceKey", source_->currentData());
-  s.setValue("format", format_->currentIndex());
-  s.setValue("tags", tags_->text());
-  s.setValue("recognitionMode", apiEnabled_->isChecked() ? "jev-api" : "reference-templates");
-  s.setValue("jevApiEnabled", apiEnabled_->isChecked());
-  s.setValue("fastSource", fastSource_);
-  s.setValue("jevApiAutoCommit", autoCommit_->isChecked());
-  s.setValue("discordChannel", discordChannelId(discordChannel_->text()));
-}
-void MainDock::loadSettings() {
-  QSettings s(configDirectory_ + "/settings.ini", QSettings::IniFormat);
-  fastSource_ = s.value("fastSource").toString();
-  apiEnabled_->setChecked(s.value("jevApiEnabled", true).toBool());
-  format_->setCurrentIndex(std::clamp(s.value("format", 1).toInt(), 0, 3));
-  tags_->setText(s.value("tags", "A, B, C, D").toString());
-  savedSource_ = s.value("schema", 0).toInt() >= 5 ? s.value("sourceKey").toString() : QString{};
-  autoCommit_->setChecked(s.value("jevApiAutoCommit", false).toBool());
-  discordChannel_->setText(s.value("discordChannel").toString());
+
+  const QByteArray stateJson =
+      QJsonDocument(overlayStateToJson(overlay)).toJson(QJsonDocument::Compact);
+  const QByteArray stateJs = overlayStateToJs(overlay);
+  if (overlayServer_)
+    overlayServer_->setState(stateJson, stateJs);
+
+  auto writeOverlayFile = [&](const QString &name, const QByteArray &bytes) {
+    if (configDirectory_.isEmpty())
+      return;
+    QFile file(configDirectory_ + "/" + name);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+      file.write(bytes);
+  };
+  writeOverlayFile(QStringLiteral("overlay-state.json"), stateJson);
+  writeOverlayFile(QStringLiteral("overlay-state.js"), stateJs);
 }
 
-void MainDock::updateDiscord() {
-  const bool connected = !loadStoredCredential(configDirectory_, "DiscordBot").isEmpty() &&
-                         !discordChannelId(discordChannel_->text()).isEmpty();
-  const bool sending = discord_ && discord_->busy();
-  discordSend_->setEnabled(connected && !session_.races().empty() && !sending && !discordCooldown_);
-  for (auto *widget : std::initializer_list<QWidget *>{discordToken_, discordChannel_, discordSave_,
-                                                       discordDelete_})
-    widget->setEnabled(!sending);
-  QString reason;
-  if (!connected)
-    reason = tr("BotトークンとチャンネルIDを設定して「Discord設定を保存」を押してください。");
-  else if (session_.races().empty())
-    reason = tr("まだ集計がありません。リザルトを確定すると送信できます。");
-  else
-    reason = tr("現在の確定済み集計を送信します。");
-  discordSend_->setToolTip(reason);
-  if (discordStatus_->text().isEmpty() ||
-      discordStatus_->text().startsWith(tr("まだ集計がありません")) ||
-      discordStatus_->text().startsWith(tr("BotトークンとチャンネルIDを設定して")))
-    discordStatus_->setText(reason);
+QJsonObject MainDock::buildLoungePayload(bool postToDiscord) const {
+  const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
+  const int players =
+      session_.tags().empty() ? configuredPlayersPerTeam() : session_.playersPerTeam();
+  const auto totalsMap = session_.totals();
+
+  QJsonArray teamsJson;
+  QJsonObject totalsJson;
+  for (const auto &tag : activeTags) {
+    const auto qtag = QString::fromStdString(tag);
+    teamsJson.append(qtag);
+    const auto it = totalsMap.find(tag);
+    totalsJson.insert(qtag, it == totalsMap.end() ? 0 : it->second);
+  }
+
+  QJsonArray racesJson;
+  for (const auto &race : session_.races()) {
+    QJsonObject pointsJson;
+    for (const auto &entry : race.points)
+      pointsJson.insert(QString::fromStdString(entry.first), entry.second);
+    QJsonArray standingsJson;
+    for (const auto &s : race.standings) {
+      standingsJson.append(
+          QJsonObject{{"rank", s.rank}, {"tag", QString::fromStdString(s.tag)}});
+    }
+    QJsonObject raceObj{{"number", race.number},
+                        {"race_span", std::max(1, race.raceSpan)},
+                        {"course", QString::fromStdString(race.course)},
+                        {"points", pointsJson},
+                        {"standings", standingsJson}};
+    if (!race.label.empty())
+      raceObj.insert("label", QString::fromStdString(race.label));
+    racesJson.append(raceObj);
+  }
+
+  QString channelId = QString::fromUtf8(QUICKSCORE_EMBEDDED_BOT_CHANNEL_ID).trimmed();
+  if (channelId.isEmpty())
+    channelId = QStringLiteral("1571454531814952971");
+
+  QJsonObject obj{{"channel_id", channelId},
+                  {"format", formatNameForPlayers(players)},
+                  {"players_per_team", players},
+                  {"teams", teamsJson},
+                  {"totals", totalsJson},
+                  {"races", racesJson},
+                  {"current_course", currentCourse_},
+                  {"race_count", int(session_.effectiveRaceCount())},
+                  {"total_races", 12},
+                  {"score_line", scores_->text()},
+                  {"active", loungeOverlayActive_},
+                  {"post_to_discord", postToDiscord}};
+  if (loungeOverlayUntilUtc_.isValid())
+    obj.insert("active_until", loungeOverlayUntilUtc_.toString(Qt::ISODate));
+  return obj;
 }
-void MainDock::sendDiscord() {
-  if (discord_->busy() || discordCooldown_ || session_.races().empty())
+
+void MainDock::syncDiscord(bool postToDiscord) {
+  if (!discord_ || !postDiscord_ || !postDiscord_->isChecked())
     return;
-  if (!QSslSocket::supportsSsl()) {
-    discordStatus_->setText(
-        tr("TLS機能を読み込めません。bin/64bit/tlsを含めて再インストールしてください。"));
+  if (!hasTestDiscordEndpoint_ && !QSslSocket::supportsSsl()) {
+    setStatus(tr("TLS機能を読み込めないためDiscordへ投稿できません。"), "#ffb74d");
     return;
   }
-  const auto channel = discordChannelId(discordChannel_->text());
-  const auto token = loadStoredCredential(configDirectory_, "DiscordBot");
-  if (channel.isEmpty() || token.isEmpty()) {
-    discordStatus_->setText(tr("BotトークンとチャンネルIDを設定して保存してください。"));
-    return;
+  QString endpointStr = QString::fromUtf8(QUICKSCORE_EMBEDDED_BOT_ENDPOINT).trimmed();
+  QString ingestKey = QString::fromUtf8(QUICKSCORE_EMBEDDED_BOT_INGEST_KEY).trimmed();
+  if (hasTestDiscordEndpoint_) {
+    if (endpointStr.isEmpty())
+      endpointStr = QStringLiteral("http://127.0.0.1/api/v1/lounge/ingest");
+    if (ingestKey.isEmpty())
+      ingestKey = QStringLiteral("test-ingest-key");
   }
-  saveSettings();
-  const auto content = scores_->text();
-  discordStatus_->setText(tr("Discordへ送信中（最大15秒）…"));
-  discord_->send(token, channel, content, [this](bool ok, const QString &message) {
-    discordStatus_->setText(message);
-    discordCooldown_ = true;
-    updateDiscord();
-    QTimer::singleShot(ok ? 2000 : 5000, this, [this] {
-      discordCooldown_ = false;
-      updateDiscord();
-    });
-  });
-  updateDiscord();
+  const auto payload = buildLoungePayload(postToDiscord);
+  discord_->sendLounge(QUrl(endpointStr), ingestKey, payload,
+                       [this](bool ok, const QString &message) {
+                         if (!ok)
+                           setStatus(message, "#ffb74d");
+                       });
 }
+
+void MainDock::syncDiscordCourse(const QString &course) {
+  if (course.isEmpty() || !discord_ || !postDiscord_ || !postDiscord_->isChecked())
+    return;
+  if (!hasTestDiscordEndpoint_ && !QSslSocket::supportsSsl())
+    return;
+  QString endpointStr = QString::fromUtf8(QUICKSCORE_EMBEDDED_BOT_ENDPOINT).trimmed();
+  QString ingestKey = QString::fromUtf8(QUICKSCORE_EMBEDDED_BOT_INGEST_KEY).trimmed();
+  if (hasTestDiscordEndpoint_) {
+    if (endpointStr.isEmpty())
+      endpointStr = QStringLiteral("http://127.0.0.1/api/v1/lounge/ingest");
+    if (ingestKey.isEmpty())
+      ingestKey = QStringLiteral("test-ingest-key");
+  }
+  lastSentCourse_ = course;
+  auto payload = buildLoungePayload(true);
+  payload.insert("event", QStringLiteral("course"));
+  payload.insert("course", course);
+  discord_->sendLounge(QUrl(endpointStr), ingestKey, payload,
+                       [this](bool ok, const QString &message) {
+                         if (!ok)
+                           setStatus(message, "#ffb74d");
+                       });
+}
+
+void MainDock::saveSettings() {
+  QSettings s(configDirectory_ + "/settings.ini", QSettings::IniFormat);
+  s.setValue("schema", 11);
+  s.setValue("sourceKey", source_->currentData());
+  s.setValue("tags", tags_->text());
+  s.setValue("postToDiscordChannel", postDiscord_->isChecked());
+}
+
+void MainDock::loadSettings() {
+  QSettings s(configDirectory_ + "/settings.ini", QSettings::IniFormat);
+  tags_->setText(s.value("tags", "A, B, C, D").toString());
+  updateDetectedFormat();
+  savedSource_ = s.value("schema", 0).toInt() >= 5 ? s.value("sourceKey").toString() : QString{};
+  postDiscord_->setChecked(s.value("postToDiscordChannel", false).toBool());
+}
+
 void MainDock::setStatus(const QString &text, const QString &color) {
   status_->setText(text);
   status_->setStyleSheet("font-weight:600;color:" + color + ";");
-}
-void MainDock::exportDiagnostic() {
-  const auto directory = QFileDialog::getExistingDirectory(this, tr("診断画像とJSONの保存先"));
-  if (directory.isEmpty())
-    return;
-  const QString base =
-      directory + "/quickscore-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss-zzz");
-  const auto &a = reviewing_ ? pending_ : latest_;
-  const auto image = a.image.isNull() ? latestImage_ : a.image;
-  if (!image.isNull() && !image.save(base + ".png")) {
-    setStatus(tr("診断画像を保存できません。"), "#ff8a80");
-    return;
-  }
-  QSaveFile file(base + ".json");
-  const auto data = QJsonDocument(QJsonObject{{"version", "0.8.1"},
-                                              {"source", source_->currentText()},
-                                              {"anchors", a.layout.anchors},
-                                              {"pluses", a.layout.pluses},
-                                              {"error", a.error},
-                                              {"rows", evidenceJson(a)}})
-                        .toJson();
-  if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
-    setStatus(tr("診断JSONを保存できません。"), "#ff8a80");
-    return;
-  }
-  setStatus(tr("診断データを保存しました: %1").arg(base));
 }
 } // namespace quickscore

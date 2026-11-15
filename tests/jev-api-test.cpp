@@ -97,6 +97,25 @@ int main(int argc, char **argv) {
       broken["answers"] = ba;
       require(!parseJevResponse(broken, captured, tags).error.isEmpty(),
               "invalid probabilities rejected");
+
+      Analysis twelfthCaptured = captured;
+      twelfthCaptured.finished_in_twelfth = true;
+      auto twelfthAnswers = answers;
+      QJsonObject unkProbs;
+      for (int i = 0; i < 6; ++i)
+        unkProbs.insert(QString("team%1").arg(i), 0.005);
+      unkProbs.insert("unknown", 0.97);
+      twelfthAnswers.insert("rank12", QJsonObject{{"type", "choice"},
+                                                 {"choice", "unknown"},
+                                                 {"confidence", .99},
+                                                 {"probabilities", unkProbs}});
+      QJsonObject twelfthResp{{"model", "jev-1.14.0"}, {"answers", twelfthAnswers}};
+      auto parsed12 = parseJevResponse(twelfthResp, twelfthCaptured, tags);
+      require(parsed12.error.isEmpty() && parsed12.standings[11].tag == tags[0] &&
+                  parsed12.standings[11].confidence == 1.0 &&
+                  parsed12.evidence[11].method == QStringLiteral("自チーム12位確定通知"),
+              "12th finish notice locks rank 12 to own team tag even when JEV returns unknown");
+
       require(jevMontage(captured.image).size() == QSize(480, 448),
               "vision dimensions within official limits");
       const auto request = jevRequest(tags, "unique-image-reference");

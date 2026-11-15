@@ -25,7 +25,9 @@ public:
  static Recognizer load(const std::wstring& path);
  static Recognizer load(const std::string& path);
  Result read(const Image& image) const;
+ Result readLayoutOnly(const Image& image) const;
  bool visibleLastRank(const Image& image, double* score=nullptr, double* margin=nullptr) const;
+ bool visibleTiedRank(const Image& image, int row, double* score=nullptr) const;
 };
 // Startup must first observe a non-result scene, avoiding re-posts after OBS restarts.
 class Gate {

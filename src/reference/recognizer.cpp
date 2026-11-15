@@ -111,6 +111,31 @@ bool Recognizer::visibleLastRank(const Image& source, double* score, double* mar
  if(margin) *margin=expected-competitor;
  return expected>=.85 && expected-competitor>=.06;
 }
+bool Recognizer::visibleTiedRank(const Image& source, int row, double* score) const {
+ if(source.w!=width||source.h!=height||row<=0||row>=12) return false;
+ std::vector<float> gray(size_t(width)*height);
+ for(size_t i=0;i<gray.size();i++)gray[i]=luminance(source.pixels.data()+i*4);
+ double best=-1;
+ for(int k=0;k<row;k++)
+  best=std::max(best,match(gray,ranks_[size_t(k)],837,row_y(row)-30,false,true,3,-3,3));
+ if(score) *score=best;
+ return best>=.72;
+}
+Result Recognizer::readLayoutOnly(const Image& source) const {
+ if(source.w!=width||source.h!=height) return readLayoutOnly(resize(source,width,height));
+ Result r;
+ std::vector<float> gray(size_t(width)*height);
+ for(size_t i=0;i<gray.size();i++)gray[i]=luminance(source.pixels.data()+i*4);
+ for(int i=0;i<12;i++) {
+  const bool inv=yellow(source,i);
+  r.anchor[i]=match(gray,ranks_[i],837,row_y(i)-30,false,true,3,-3,3);
+  r.plus[i]=match(gray,plus_,1585,row_y(i)-10,inv,false,3,-3,3);
+  if(r.anchor[i]>=.65)r.anchors++;
+  if(r.plus[i]>=.72)r.pluses++;
+ }
+ r.visible=r.anchors>=9;
+ return r;
+}
 Result Recognizer::read(const Image& source) const {
  if(source.w!=width||source.h!=height) return read(resize(source,width,height));
  Result r;

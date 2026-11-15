@@ -30,13 +30,17 @@ bool obs_module_load(void)
   bfree(path);
   QDir().mkpath(configDirectory);
   g_dock = new quickscore::MainDock(configDirectory);
-  if (!obs_frontend_add_dock_by_id("mk8dx_quickscore_dock", obs_module_text("DockTitle"), g_dock)) {
+  const QString dockTitle = QString("%1 (v%2)")
+      .arg(QString::fromUtf8(obs_module_text("DockTitle")),
+           QStringLiteral(QUICKSCORE_VERSION));
+  if (!obs_frontend_add_dock_by_id("mk8dx_quickscore_dock", dockTitle.toUtf8().constData(), g_dock)) {
     blog(LOG_ERROR, "[MK8DX QuickScore] Failed to add dock");
     delete g_dock;
     g_dock = nullptr;
     return false;
   }
-  blog(LOG_INFO, "[MK8DX QuickScore] loaded (0.8.1 TypeSafe Jev API, result captures)");
+  blog(LOG_INFO, "[MK8DX QuickScore] loaded (%s TypeSafe Jev API, course + result captures)",
+       QUICKSCORE_VERSION);
   return true;
 }
 

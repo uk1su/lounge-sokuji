@@ -1,5 +1,6 @@
 #include "jev-api-reader.hpp"
 #include "credential-store.hpp"
+#include "embedded-secrets.hpp"
 #include <QBuffer>
 #include <QHttpMultiPart>
 #include <QJsonDocument>
@@ -58,7 +59,7 @@ QJsonObject jevRequest(const std::vector<std::string> &tags, const QString &refe
                                  {"instructions", QString("First name character at Rank %1, row %2, column %3?")
                                                       .arg(row + 1).arg(row / 3 + 1).arg(row % 3 + 1)}});
   return {{"model", "jev-1.14.0"},
-          {"state", QJsonObject{{"montage", reference}, {"rules", "Read only the FIRST character of each player name. Ignore suffixes and team counts. Choose unknown if obscured or ambiguous."}}},
+          {"state", QJsonObject{{"montage", reference}, {"rules", "Match ONLY the FIRST visible character (Latin or Japanese Kana/Kanji) of each player name against the team criteria, ignoring suffixes and minor background texture. Choose unknown only if unreadable or covered by a system banner."}}},
           {"assets", QJsonObject{{reference, QJsonObject{{"type", "image"}, {"part", "montage"}}}}},
           {"questions", questions}};
 }
@@ -108,12 +109,17 @@ Analysis parseJevResponse(const QJsonObject &reply, Analysis frame,
       if (choice == QString("team%1").arg(i)) {
         e.closestTag = tags[i];
         e.closestScore = best;
-        if (best >= .90 && best - second >= .25 && a["confidence"].toDouble() >= .90) {
+        const double conf = a["confidence"].toDouble();
+        const double margin = best - second;
+        if ((best >= .90 && margin >= .25 && conf >= .90) ||
+            (best >= .85 && margin >= .45 && conf >= .85)) {
           frame.standings[size_t(row)].tag = tags[i];
-          frame.standings[size_t(row)].confidence = std::min(best, a["confidence"].toDouble());
+          frame.standings[size_t(row)].confidence = std::min(best, conf);
         }
       }
   }
+  if (frame.error.isEmpty())
+    enforceTwelfthFinishNotice(frame, tags);
   return frame;
 }
 JevApiReader::JevApiReader(QString profile, QUrl endpoint)
@@ -126,12 +132,14 @@ QString JevApiReader::key() const {
   auto k = loadStoredCredential(profile_, "JevApi");
   if (k.isEmpty())
     k = qEnvironmentVariable("TYPESAFE_API_KEY");
+  if (k.isEmpty())
+    k = QString::fromUtf8(QUICKSCORE_EMBEDDED_JEV_API_KEY);
   return k.trimmed();
 }
 QString JevApiReader::configurationError() const {
   const auto k = key();
   return k.isEmpty() || k.contains('\n') || k.contains('\r')
-             ? QStringLiteral("Jev APIキーを入力し「APIキーを保存」を押してください。")
+             ? QStringLiteral("判定用APIキーが設定されていません。")
              : QString{};
 }
 void JevApiReader::cancel() {

@@ -26,6 +26,58 @@ std::string escapeJson(const std::string &value)
   }
   return out.str();
 }
+bool trySolveUnknownStandings(const std::vector<Standing> &partial,
+                              const std::map<std::string, int> &targetPoints,
+                              const std::vector<std::string> &tags,
+                              int playersPerTeam,
+                              std::vector<Standing> &solved)
+{
+  if (partial.size() != 12) return false;
+  const std::set<std::string> allowed(tags.begin(), tags.end());
+  std::vector<size_t> unknownIndices;
+  std::map<std::string, int> neededCount;
+  std::map<std::string, int> neededPoints = targetPoints;
+  for (const auto &t : tags) neededCount[t] = playersPerTeam;
+
+  solved = partial;
+  for (size_t i = 0; i < 12; ++i) {
+    solved[i].rank = int(i + 1);
+    const int pts = kMarioKartPoints[i];
+    const auto &tag = partial[i].tag;
+    if (!tag.empty() && allowed.count(tag) && partial[i].confidence >= 0.75 &&
+        neededCount[tag] > 0 && neededPoints[tag] >= pts) {
+      --neededCount[tag];
+      neededPoints[tag] -= pts;
+    } else {
+      solved[i].tag.clear();
+      unknownIndices.push_back(i);
+    }
+  }
+
+  auto dfs = [&](auto &self, size_t uIdx) -> bool {
+    if (uIdx == unknownIndices.size()) {
+      for (const auto &t : tags) {
+        if (neededCount[t] != 0 || neededPoints[t] != 0) return false;
+      }
+      return true;
+    }
+    const size_t row = unknownIndices[uIdx];
+    const int pts = kMarioKartPoints[row];
+    for (const auto &t : tags) {
+      if (neededCount[t] <= 0 || neededPoints[t] < pts) continue;
+      --neededCount[t];
+      neededPoints[t] -= pts;
+      solved[row].tag = t;
+      solved[row].confidence = 1.0;
+      if (self(self, uIdx + 1)) return true;
+      neededPoints[t] += pts;
+      ++neededCount[t];
+      solved[row].tag.clear();
+    }
+    return false;
+  };
+  return dfs(dfs, 0);
+}
 } // namespace
 
 std::map<std::string, int> scoreRace(const std::vector<Standing> &standings)
@@ -87,12 +139,20 @@ void Session::configure(std::vector<std::string> tags, int playersPerTeam)
   playersPerTeam_ = playersPerTeam;
 }
 
+bool Session::hasAutoConfirmedRace() const
+{
+  return std::any_of(races_.begin(), races_.end(), [](const RaceResult &race) {
+    return race.raceSpan == 1 && !race.corrected && race.standings.size() == 12;
+  });
+}
+
 ValidationResult Session::validate(const std::vector<Standing> &standings) const
 {
   return validateRace(standings, tags_, playersPerTeam_);
 }
 
-bool Session::commit(std::vector<Standing> standings, bool corrected, ValidationResult *failure)
+bool Session::commit(std::vector<Standing> standings, bool corrected, ValidationResult *failure,
+                     std::string course)
 {
   auto validation = validate(standings);
   if (!validation.ok) {
@@ -100,29 +160,287 @@ bool Session::commit(std::vector<Standing> standings, bool corrected, Validation
     return false;
   }
   RaceResult race;
-  race.number = static_cast<int>(races_.size()) + 1;
+  race.raceSpan = 1;
+  race.number = static_cast<int>(effectiveRaceCount()) + 1;
   race.points = scoreRace(standings);
   race.standings = std::move(standings);
   race.corrected = corrected;
+  race.course = std::move(course);
   races_.push_back(std::move(race));
+  renumberRaces();
   return true;
+}
+
+bool Session::replaceRace(size_t index, std::vector<Standing> standings, bool corrected,
+                          ValidationResult *failure)
+{
+  if (index >= races_.size() || races_[index].raceSpan != 1) return false;
+  auto validation = validate(standings);
+  if (!validation.ok) {
+    if (failure) *failure = std::move(validation);
+    return false;
+  }
+  races_[index].points = scoreRace(standings);
+  races_[index].standings = std::move(standings);
+  races_[index].corrected = corrected;
+  teamAdjustments_.clear();
+  renumberRaces();
+  return true;
+}
+
+void Session::deferFirstRace(std::vector<Standing> partialStandings, std::string course)
+{
+  if (!races_.empty() || pendingFirstRace_) return;
+  pendingFirstRace_ = true;
+  pendingFirstRaceStandings_ = std::move(partialStandings);
+  pendingFirstRaceCourse_ = std::move(course);
+}
+
+bool Session::resolvePendingFirstRaceManually(std::vector<Standing> standings, bool corrected,
+                                              ValidationResult *failure)
+{
+  if (!pendingFirstRace_) return false;
+  auto validation = validate(standings);
+  if (!validation.ok) {
+    if (failure) *failure = std::move(validation);
+    return false;
+  }
+  RaceResult race;
+  race.number = 1;
+  race.points = scoreRace(standings);
+  race.standings = std::move(standings);
+  race.corrected = corrected;
+  race.course = std::move(pendingFirstRaceCourse_);
+  races_.insert(races_.begin(), std::move(race));
+  pendingFirstRace_ = false;
+  pendingFirstRaceStandings_.clear();
+  pendingFirstRaceCourse_.clear();
+  teamAdjustments_.clear();
+  renumberRaces();
+  return true;
+}
+
+bool Session::reconcileWithCumulativeTotals(const std::map<std::string, int> &gameTotals,
+                                            int gameRaceCount, bool *changed)
+{
+  if (changed) *changed = false;
+  if (tags_.empty() || gameRaceCount <= 0 || gameTotals.size() != tags_.size()) return false;
+  int sum = 0;
+  for (const auto &t : tags_) {
+    const auto it = gameTotals.find(t);
+    if (it == gameTotals.end() || it->second < 0) return false;
+    sum += it->second;
+  }
+  if (sum != 82 * gameRaceCount) return false;
+
+  if (pendingFirstRace_ && gameRaceCount == static_cast<int>(effectiveRaceCount())) {
+    const auto committed = committedTotals();
+    std::map<std::string, int> race1Points;
+    bool allNonNegative = true;
+    for (const auto &t : tags_) {
+      const int diff = gameTotals.at(t) - (committed.count(t) ? committed.at(t) : 0);
+      race1Points[t] = diff;
+      if (diff < 0) allNonNegative = false;
+    }
+
+    RaceResult r1;
+    r1.number = 1;
+    r1.raceSpan = 1;
+    r1.corrected = true;
+    r1.course = std::move(pendingFirstRaceCourse_);
+    if (allNonNegative) {
+      std::vector<Standing> solved;
+      if (trySolveUnknownStandings(pendingFirstRaceStandings_, race1Points, tags_, playersPerTeam_,
+                                   solved)) {
+        r1.standings = std::move(solved);
+        r1.points = scoreRace(r1.standings);
+      } else {
+        r1.standings = pendingFirstRaceStandings_;
+        r1.points = std::move(race1Points);
+      }
+      teamAdjustments_.clear();
+    } else {
+      for (const auto &t : tags_) r1.points[t] = 0;
+      r1.standings = pendingFirstRaceStandings_;
+      for (const auto &t : tags_) {
+        const int adj = gameTotals.at(t) - (committed.count(t) ? committed.at(t) : 0);
+        if (adj != 0) teamAdjustments_[t] = adj;
+      }
+    }
+
+    races_.insert(races_.begin(), std::move(r1));
+    pendingFirstRace_ = false;
+    pendingFirstRaceStandings_.clear();
+    pendingFirstRaceCourse_.clear();
+    renumberRaces();
+    if (changed) *changed = true;
+    return true;
+  }
+
+  if (!pendingFirstRace_ && races_.size() == 1 && races_[0].raceSpan == 1 &&
+      !races_[0].corrected && inGameScoreOffset_ == 0 && gameRaceCount >= 2) {
+    const auto &firstPts = races_[0].points;
+    std::map<std::string, int> priorPoints;
+    bool ok = true;
+    int priorSum = 0;
+    for (const auto &t : tags_) {
+      const int committedPt = firstPts.count(t) ? firstPts.at(t) : 0;
+      const int priorPt = gameTotals.at(t) - committedPt;
+      if (priorPt < 0) {
+        ok = false;
+        break;
+      }
+      priorPoints[t] = priorPt;
+      priorSum += priorPt;
+    }
+    const int priorRaces = gameRaceCount - 1;
+    if (ok && priorSum == 82 * priorRaces) {
+      RaceResult summary;
+      summary.number = priorRaces;
+      summary.raceSpan = priorRaces;
+      summary.corrected = true;
+      summary.points = std::move(priorPoints);
+      summary.label = priorRaces == 1 ? std::string("1R合計")
+                                      : ("1〜" + std::to_string(priorRaces) + "R合計");
+      races_.insert(races_.begin(), std::move(summary));
+      teamAdjustments_.clear();
+      renumberRaces();
+      if (changed) *changed = true;
+      return true;
+    }
+  }
+
+  if (!pendingFirstRace_ && inGameScoreOffset_ == 0 &&
+      gameRaceCount == static_cast<int>(effectiveRaceCount())) {
+    const auto current = totals();
+    if (current == gameTotals) return true;
+    const auto committed = committedTotals();
+    teamAdjustments_.clear();
+    for (const auto &t : tags_) {
+      const int delta = gameTotals.at(t) - (committed.count(t) ? committed.at(t) : 0);
+      if (delta != 0) teamAdjustments_[t] = delta;
+    }
+    if (changed) *changed = true;
+    return true;
+  }
+
+  return false;
+}
+
+bool Session::importPriorSummary(int priorRaces, const std::map<std::string, int> &priorTotals,
+                                 std::string label)
+{
+  if (priorRaces < 1 || !races_.empty() || pendingFirstRace_ || tags_.empty())
+    return false;
+  int sum = 0;
+  std::map<std::string, int> cleanTotals;
+  for (const auto &t : tags_) {
+    const auto it = priorTotals.find(t);
+    if (it == priorTotals.end() || it->second < 0)
+      return false;
+    cleanTotals[t] = it->second;
+    sum += it->second;
+  }
+  if (sum != 82 * priorRaces)
+    return false;
+
+  RaceResult summary;
+  summary.raceSpan = priorRaces;
+  summary.number = priorRaces;
+  summary.corrected = true;
+  summary.points = std::move(cleanTotals);
+  summary.label = !label.empty() ? std::move(label)
+                                 : (priorRaces == 1
+                                        ? std::string("1R合計")
+                                        : ("1〜" + std::to_string(priorRaces) + "R合計"));
+  races_.push_back(std::move(summary));
+  teamAdjustments_.clear();
+  renumberRaces();
+  return true;
+}
+
+bool Session::restoreRaceAndAdjustments(RaceResult race, bool prepend)
+{
+  if (prepend) races_.insert(races_.begin(), std::move(race));
+  else races_.push_back(std::move(race));
+  renumberRaces();
+  return true;
+}
+
+void Session::setTeamAdjustments(std::map<std::string, int> adjustments)
+{
+  teamAdjustments_ = std::move(adjustments);
+}
+
+void Session::setInGameScoreOffset(int offset)
+{
+  inGameScoreOffset_ = std::max(0, offset);
+}
+
+void Session::addInGameScoreOffset(int delta)
+{
+  inGameScoreOffset_ = std::max(0, inGameScoreOffset_ + delta);
+}
+
+size_t Session::effectiveRaceCount() const
+{
+  size_t count = pendingFirstRace_ ? 1 : 0;
+  for (const auto &race : races_)
+    count += static_cast<size_t>(std::max(1, race.raceSpan));
+  return count;
+}
+
+void Session::renumberRaces()
+{
+  int nextRace = pendingFirstRace_ ? 2 : 1;
+  for (auto &r : races_) {
+    const int span = std::max(1, r.raceSpan);
+    nextRace += span - 1;
+    r.number = nextRace;
+    ++nextRace;
+  }
 }
 
 bool Session::undo()
 {
-  if (races_.empty()) return false;
-  races_.pop_back();
-  return true;
+  if (!races_.empty()) {
+    races_.pop_back();
+    teamAdjustments_.clear();
+    return true;
+  }
+  if (pendingFirstRace_) {
+    pendingFirstRace_ = false;
+    pendingFirstRaceStandings_.clear();
+    pendingFirstRaceCourse_.clear();
+    teamAdjustments_.clear();
+    return true;
+  }
+  return false;
 }
 
-void Session::reset() { races_.clear(); }
+void Session::reset()
+{
+  races_.clear();
+  teamAdjustments_.clear();
+  inGameScoreOffset_ = 0;
+  pendingFirstRace_ = false;
+  pendingFirstRaceStandings_.clear();
+  pendingFirstRaceCourse_.clear();
+}
 
-std::map<std::string, int> Session::totals() const
+std::map<std::string, int> Session::committedTotals() const
 {
   std::map<std::string, int> result;
   for (const auto &tag : tags_) result[tag] = 0;
   for (const auto &race : races_)
     for (const auto &entry : race.points) result[entry.first] += entry.second;
+  return result;
+}
+
+std::map<std::string, int> Session::totals() const
+{
+  auto result = committedTotals();
+  for (const auto &entry : teamAdjustments_) result[entry.first] += entry.second;
   return result;
 }
 
@@ -134,12 +452,38 @@ std::string Session::toJson() const
     if (i) out << ", ";
     out << '"' << escapeJson(tags_[i]) << '"';
   }
-  out << "],\n  \"races\": [";
+  out << "],\n  \"inGameScoreOffset\": " << inGameScoreOffset_
+      << ",\n  \"pendingFirstRace\": " << (pendingFirstRace_ ? "true" : "false")
+      << ",\n  \"pendingFirstRaceCourse\": \"" << escapeJson(pendingFirstRaceCourse_)
+      << "\",\n  \"pendingFirstRaceStandings\": [";
+  for (size_t j = 0; j < pendingFirstRaceStandings_.size(); ++j) {
+    if (j) out << ',';
+    const auto &s = pendingFirstRaceStandings_[j];
+    out << "{\"rank\":" << s.rank << ",\"tag\":\"" << escapeJson(s.tag)
+        << "\",\"confidence\":" << std::fixed << std::setprecision(3) << s.confidence << '}';
+  }
+  out << "],\n  \"teamAdjustments\": {";
+  bool firstAdj = true;
+  for (const auto &entry : teamAdjustments_) {
+    if (!firstAdj) out << ',';
+    firstAdj = false;
+    out << '"' << escapeJson(entry.first) << "\": " << entry.second;
+  }
+  out << "},\n  \"races\": [";
   for (size_t i = 0; i < races_.size(); ++i) {
     const auto &race = races_[i];
     if (i) out << ',';
-    out << "\n    {\"number\": " << race.number << ", \"corrected\": "
-        << (race.corrected ? "true" : "false") << ", \"standings\": [";
+    out << "\n    {\"number\": " << race.number << ", \"raceSpan\": " << std::max(1, race.raceSpan)
+        << ", \"label\": \"" << escapeJson(race.label) << "\", \"corrected\": "
+        << (race.corrected ? "true" : "false") << ", \"course\": \""
+        << escapeJson(race.course) << "\", \"points\": {";
+    bool firstPt = true;
+    for (const auto &entry : race.points) {
+      if (!firstPt) out << ',';
+      firstPt = false;
+      out << '"' << escapeJson(entry.first) << "\": " << entry.second;
+    }
+    out << "}, \"standings\": [";
     for (size_t j = 0; j < race.standings.size(); ++j) {
       if (j) out << ',';
       const auto &s = race.standings[j];
@@ -152,4 +496,56 @@ std::string Session::toJson() const
   return out.str();
 }
 
+bool trySolveUnknownStandings(const std::vector<Standing> &partial,
+                              const std::map<std::string, int> &targetPoints,
+                              const std::vector<std::string> &tags,
+                              int playersPerTeam,
+                              std::vector<Standing> &solved)
+{
+  if (partial.size() != 12) return false;
+  const std::set<std::string> allowed(tags.begin(), tags.end());
+  std::vector<size_t> unknownIndices;
+  std::map<std::string, int> neededCount;
+  std::map<std::string, int> neededPoints = targetPoints;
+  for (const auto &t : tags) neededCount[t] = playersPerTeam;
+
+  solved = partial;
+  for (size_t i = 0; i < 12; ++i) {
+    solved[i].rank = int(i + 1);
+    const int pts = kMarioKartPoints[i];
+    const auto &tag = partial[i].tag;
+    if (!tag.empty() && allowed.count(tag) && partial[i].confidence >= 0.75 &&
+        neededCount[tag] > 0 && neededPoints[tag] >= pts) {
+      --neededCount[tag];
+      neededPoints[tag] -= pts;
+    } else {
+      solved[i].tag.clear();
+      unknownIndices.push_back(i);
+    }
+  }
+
+  auto dfs = [&](auto &self, size_t uIdx) -> bool {
+    if (uIdx == unknownIndices.size()) {
+      for (const auto &t : tags) {
+        if (neededCount[t] != 0 || neededPoints[t] != 0) return false;
+      }
+      return true;
+    }
+    const size_t row = unknownIndices[uIdx];
+    const int pts = kMarioKartPoints[row];
+    for (const auto &t : tags) {
+      if (neededCount[t] <= 0 || neededPoints[t] < pts) continue;
+      --neededCount[t];
+      neededPoints[t] -= pts;
+      solved[row].tag = t;
+      solved[row].confidence = 1.0;
+      if (self(self, uIdx + 1)) return true;
+      neededPoints[t] += pts;
+      ++neededCount[t];
+      solved[row].tag.clear();
+    }
+    return false;
+  };
+  return dfs(dfs, 0);
+}
 } // namespace quickscore
