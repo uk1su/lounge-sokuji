@@ -26,6 +26,25 @@ try {
     & $CMake -S $projectRoot -B $build "-DQUICKSCORE_TLS_BACKEND=$([IO.Path]::GetFullPath($TlsBackend))"
     if ($LASTEXITCODE -ne 0) { throw 'TLS configuration failed.' }
   }
+  $cmakeDir = [IO.Path]::GetDirectoryName($CMake)
+  $ninjaDir = [IO.Path]::GetFullPath((Join-Path $cmakeDir '..\..\Ninja'))
+  if ((Test-Path -LiteralPath $ninjaDir) -and -not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+    $env:PATH = $ninjaDir + ';' + $env:PATH
+  }
+  if (-not $env:INCLUDE -or -not (Get-Command cl -ErrorAction SilentlyContinue)) {
+    $vsRoot = [IO.Path]::GetFullPath((Join-Path $cmakeDir '..\..\..\..\..\..\..'))
+    $devShell = Join-Path $vsRoot 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+    if (Test-Path -LiteralPath $devShell) {
+      Import-Module $devShell
+      Enter-VsDevShell -VsInstallPath $vsRoot -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+    }
+  }
+  # Rebuild cleanly so header layout changes (e.g., MainDock size) cannot leave stale object files.
+  & $CMake --build $build --clean-first --parallel 4
+  if ($LASTEXITCODE -ne 0) { throw 'Clean build failed.' }
+  $ctest = Join-Path $cmakeDir 'ctest.exe'
+  & $ctest --test-dir $build --output-on-failure
+  if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
   New-Item -ItemType Directory -Path $package -Force | Out-Null
   & $CMake --install $build --prefix (Join-Path $package 'mk8dx-quickscore')
   if ($LASTEXITCODE -ne 0) { throw 'CMake install failed.' }
