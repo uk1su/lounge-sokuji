@@ -29,7 +29,7 @@ try {
   New-Item -ItemType Directory -Path $package -Force | Out-Null
   & $CMake --install $build --prefix (Join-Path $package 'mk8dx-quickscore')
   if ($LASTEXITCODE -ne 0) { throw 'CMake install failed.' }
-  foreach ($name in @('README.md','INSTALL.txt','LICENSE','CHANGELOG.md','install.ps1','install.cmd')) {
+  foreach ($name in @('README.md','INSTALL.txt','LICENSE','CHANGELOG.md','support.ps1','install.bat')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $package
   }
   foreach ($name in @('docs','third-party')) {

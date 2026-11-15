@@ -1,3 +1,3 @@
 ﻿QuickScore 0.8.1 / Jev API
-OBS終了後にinstall.cmdを実行し、OBSのQuickScoreドックでAPIキー・元映像・形式・タグを設定してください。
-初期設定は12人の手動確認です。詳しくはREADME.mdを参照してください。
+OBS終了後に install.bat（拡張子非表示の場合は install）を実行し、OBSのQuickScoreドックで元映像・形式・タグを設定してください。
+詳しくは README.md を参照してください。
