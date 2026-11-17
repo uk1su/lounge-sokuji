@@ -36,6 +36,7 @@ private:
   std::string candidate_;
   std::string sentCourse_;
   int stableCount_{0};
+  int missCount_{0};
   uint64_t lastTimeMs_{0};
 };
 

@@ -35,7 +35,7 @@ constexpr CourseEntry kCourseDefinitions[] = {
     {"ドルフィンみさき", "ドルフィンみさき"},
     {"エレクトロドリーム", "エレクトロドリーム"},
     {"ワリオスノーマウンテン", "ワリオスノーマウンテン"},
-    {"クラウドガーデン", "クラウドガーデン"},
+    {"スカイガーデン", "スカイガーデン"},
     {"ホネホネさばく", "ホネホネさばく"},
     {"クッパキャッスル", "クッパキャッスル"},
     {"レインボーロード", "レインボーロード"},
@@ -205,10 +205,16 @@ struct CourseTitle {
 CourseTitle splitTitle(const std::string &text) {
   const auto clean = toNormalizedCodepoints(text);
   for (const auto *prefix :
-       {U"3DS", U"N64", U"64", U"GBA", U"WII", U"SFC", U"GC", U"DS", U"TOUR"}) {
+       {U"3DS", U"N64", U"64", U"GBA", U"WII", U"SFC", U"5FC", U"SEC", U"GC", U"DS", U"TOUR"}) {
     const std::u32string p = prefix;
-    if (clean.rfind(p, 0) == 0)
-      return {p == U"64" ? U"N64" : p, clean.substr(p.size())};
+    if (clean.rfind(p, 0) == 0) {
+      std::u32string norm = p;
+      if (p == U"64")
+        norm = U"N64";
+      else if (p == U"5FC" || p == U"SEC")
+        norm = U"SFC";
+      return {norm, clean.substr(p.size())};
+    }
   }
   return {{}, clean};
 }
@@ -249,11 +255,14 @@ int scoreEntry(const std::string &ocrClean, const CourseEntry &entry) {
   const bool gba = input.prefix == U"GBA";
   if (std::strcmp(entry.canonical, "GBAスカイガーデン") == 0 && !gba)
     return 0;
-  if (std::strcmp(entry.canonical, "クラウドガーデン") == 0 && gba)
+  if (std::strcmp(entry.canonical, "スカイガーデン") == 0 && gba)
     return 0;
   int best = std::max(orderedEditScore(input.body, game.body),
                       orderedEditScore(input.body, canonical.body));
-  if (input.prefix.empty() && !canonical.prefix.empty())
+  // Exception: "SFCマリオサーキット3" has a unique trailing '3' in its body,
+  // and Windows OCR frequently drops the far-left "SFC" badge.
+  if (input.prefix.empty() && !canonical.prefix.empty() &&
+      std::strcmp(entry.canonical, "SFCマリオサーキット3") != 0)
     best = std::max(0, best - 1200);
   return best;
 }
@@ -358,29 +367,58 @@ std::optional<std::string> CourseRecognizer::recognize(const QImage &source) {
   if (im.isNull())
     return std::nullopt;
 
-  QImage titleArea =
-      im.copy(450, 945, 1000, 90).convertToFormat(QImage::Format_ARGB32_Premultiplied);
-  std::string rawText;
-  try {
-    using namespace winrt::Windows::Graphics::Imaging;
-    SoftwareBitmap bitmap(BitmapPixelFormat::Bgra8, titleArea.width(), titleArea.height(),
-                          BitmapAlphaMode::Premultiplied);
-    {
-      auto buffer = bitmap.LockBuffer(BitmapBufferAccessMode::Write);
-      auto reference = buffer.CreateReference();
-      uint8_t *bytes = nullptr;
-      uint32_t capacity = 0;
-      reference.as<::Windows::Foundation::IMemoryBufferByteAccess>()->GetBuffer(&bytes, &capacity);
-      const auto plane = buffer.GetPlaneDescription(0);
-      for (int y = 0; y < titleArea.height(); ++y) {
-        std::memcpy(bytes + plane.StartIndex + y * plane.Stride, titleArea.constScanLine(y),
-                    size_t(titleArea.width() * 4));
+  auto runOcr = [&](const QImage &area) -> std::string {
+    const QImage premul = area.format() == QImage::Format_ARGB32_Premultiplied
+                              ? area
+                              : area.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    std::string rawText;
+    try {
+      using namespace winrt::Windows::Graphics::Imaging;
+      SoftwareBitmap bitmap(BitmapPixelFormat::Bgra8, premul.width(), premul.height(),
+                            BitmapAlphaMode::Premultiplied);
+      {
+        auto buffer = bitmap.LockBuffer(BitmapBufferAccessMode::Write);
+        auto reference = buffer.CreateReference();
+        uint8_t *bytes = nullptr;
+        uint32_t capacity = 0;
+        reference.as<::Windows::Foundation::IMemoryBufferByteAccess>()->GetBuffer(&bytes, &capacity);
+        const auto plane = buffer.GetPlaneDescription(0);
+        for (int y = 0; y < premul.height(); ++y) {
+          std::memcpy(bytes + plane.StartIndex + y * plane.Stride, premul.constScanLine(y),
+                      size_t(premul.width() * 4));
+        }
       }
+      rawText = winrt::to_string(impl_->engine.RecognizeAsync(bitmap).get().Text());
+    } catch (...) {
     }
-    rawText = winrt::to_string(impl_->engine.RecognizeAsync(bitmap).get().Text());
-  } catch (...) {
+    return rawText;
+  };
+
+  QImage titleArea = im.copy(450, 945, 1000, 90);
+  if (auto matched = matchCourseName(runOcr(titleArea)))
+    return matched;
+
+  // Fallback for noisy/low-contrast banners: trim cup icon & right scene, upscale 2x,
+  // and stretch dark low-chroma glyphs onto clean white for WinRT OCR.
+  QImage cleanStrip = im.copy(470, 950, 930, 80)
+                          .scaled(1860, 160, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                          .convertToFormat(QImage::Format_ARGB32);
+  for (int y = 0; y < cleanStrip.height(); ++y) {
+    QRgb *line = reinterpret_cast<QRgb *>(cleanStrip.scanLine(y));
+    for (int x = 0; x < cleanStrip.width(); ++x) {
+      const QRgb p = line[x];
+      const int r = qRed(p), g = qGreen(p), b = qBlue(p);
+      const int minv = std::min({r, g, b});
+      const int maxv = std::max({r, g, b});
+      int v = 255;
+      if (maxv - minv <= 45) {
+        const int luma = (r + g + b) / 3;
+        v = std::clamp((luma - 55) * 255 / 60, 0, 255);
+      }
+      line[x] = qRgba(v, v, v, 255);
+    }
   }
-  return matchCourseName(rawText);
+  return matchCourseName(runOcr(cleanStrip));
 #else
   (void)source;
   return std::nullopt;
@@ -389,17 +427,22 @@ std::optional<std::string> CourseRecognizer::recognize(const QImage &source) {
 
 std::optional<std::string> CourseGate::observe(const std::optional<std::string> &detectedCourse,
                                                uint64_t nowMs, bool allow) {
-  if (lastTimeMs_ && (nowMs - lastTimeMs_ > 1500)) {
+  if (lastTimeMs_ && (nowMs < lastTimeMs_ || nowMs - lastTimeMs_ > 1500)) {
     stableCount_ = 0;
+    missCount_ = 0;
     candidate_.clear();
   }
   lastTimeMs_ = nowMs;
 
   if (!detectedCourse.has_value()) {
-    stableCount_ = 0;
-    candidate_.clear();
+    // Allow one transient OCR miss without dropping a valid first frame.
+    if (++missCount_ >= 2) {
+      stableCount_ = 0;
+      candidate_.clear();
+    }
     return std::nullopt;
   }
+  missCount_ = 0;
 
   const std::string &course = *detectedCourse;
   if (candidate_ != course) {
@@ -422,6 +465,7 @@ void CourseGate::reset() {
   candidate_.clear();
   sentCourse_.clear();
   stableCount_ = 0;
+  missCount_ = 0;
   lastTimeMs_ = 0;
 }
 

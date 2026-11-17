@@ -131,6 +131,10 @@ int main(int argc, char **argv) {
                                                  {"choice", "unknown"},
                                                  {"confidence", .98},
                                                  {"probabilities", probs}});
+      unknownAnswers.insert("rank2", QJsonObject{{"type", "choice"},
+                                                 {"choice", "unknown"},
+                                                 {"confidence", .98},
+                                                 {"probabilities", probs}});
     }
     const QByteArray unknownRow0Body =
         QJsonDocument(QJsonObject{{"model", "jev-1.14.0"},
@@ -314,10 +318,11 @@ int main(int argc, char **argv) {
     elapsed.restart();
     while (!preview->isEditing() && elapsed.elapsed() < 10000)
       pump(image, 50);
-    require(preview->isEditing() && preview->rowTag(0).isEmpty() && jevApi.count == 4 &&
-                discordApi.count == 3,
+    require(preview->isEditing() && preview->rowTag(0).isEmpty() && preview->rowTag(1).isEmpty() &&
+                jevApi.count == 4 && discordApi.count == 3,
             "unknown player opens clickable badge review without posting to Discord");
     preview->setRowTag(0, QStringLiteral("M"));
+    preview->setRowTag(1, QStringLiteral("う"));
     dock->findChild<QPushButton *>("confirm")->click();
     const auto thirdLine = QStringLiteral(
         "【M】51／う 51 (±0)／L 48 (+3)／A 42 (+9)／B 27 (+24)／R 27 (+24)／現在1位／＠9");
@@ -412,6 +417,27 @@ int main(int argc, char **argv) {
     }
     require(QDir(config.path() + "/captures").entryList({"*.json"}, QDir::Files).size() == 6,
             "exact images saved");
+    {
+      jevApi.status = 200;
+      start->click();
+      elapsed.restart();
+      while (discordApi.count < 8 && elapsed.elapsed() < 5000)
+        pump(blank, 50);
+      raceHistory->setCurrentIndex(0);
+      editRace->click();
+      require(preview->isEditing(), "ExistingRace editor opens while aggregation is running");
+      pump(blank, 3500);
+      require(preview->isEditing(),
+              "untouched ExistingRace editor stays open during non-result frames");
+      const auto fifthLine = QStringLiteral(
+          "う 91 (-12)／L 80 (-1)／【M】79／A 70 (+9)／B 45 (+34)／R 45 (+34)／現在3位／＠7");
+      elapsed.restart();
+      while ((scores->text() != fifthLine || preview->isEditing()) && elapsed.elapsed() < 10000)
+        pump(image, 50);
+      require(scores->text() == fifthLine && !preview->isEditing(),
+              "background monitoring arms during ExistingRace edit and auto-commits new race");
+      stop->click();
+    }
     QFile report(args[6] + ".json");
     require(report.open(QIODevice::WriteOnly), "report");
     report.write(QJsonDocument(QJsonObject{{"real_obs_capture", true},

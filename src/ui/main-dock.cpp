@@ -445,7 +445,10 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
 
   preview_ = new ResultPreviewWidget;
   preview_->setPlaceholderText(tr("集計開始後、ここにリザルトを表示します"));
-  preview_->setOnEdited([this] { userTouchedReview_ = true; });
+  preview_->setOnEdited([this] {
+    userTouchedReview_ = true;
+    reviewOpenedMs_ = clock_.elapsed();
+  });
   layout->addWidget(preview_);
 
   reviewHelp_ = new QLabel(tr("右のバッジをクリックしてチームを選択してください。"));
@@ -599,7 +602,18 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   auto *timer = new QTimer(this);
   timer->setInterval(1000);
   connect(timer, &QTimer::timeout, this, [this] {
-    if (!running_ || reviewing_)
+    if (!running_)
+      return;
+    if (reviewing_ &&
+        (editMode_ == EditMode::ExistingRace || editMode_ == EditMode::PendingFirstRace) &&
+        !retryInFlight_ && (clock_.elapsed() - reviewOpenedMs_) >= 60000) {
+      cancelReview();
+      if (!latestImage_.isNull())
+        updatePreview(latestImage_);
+      setStatus(tr("編集画面を1分間操作しなかったため、ライブ監視へ戻りました。"));
+      return;
+    }
+    if (reviewing_)
       return;
     if (clock_.elapsed() - lastFrameMs_ > 2500) {
       if (api_->busy()) {
@@ -819,7 +833,7 @@ void MainDock::receiveFrame(Frame frame) {
       (latest_.complete() || latest_.layout.visible || latest_.isCumulativeStandings());
   if (!reviewing_ && !holdCommittedPreview)
     updatePreview(latestImage_);
-  if (api_->busy() || busy_ || reviewing_ || !analyzer_)
+  if (busy_ || !analyzer_)
     return;
   {
     std::lock_guard<std::mutex> lock(workerMutex_);
@@ -899,7 +913,7 @@ void MainDock::receiveAnalysis(Analysis result, uint64_t generation, qint64 dura
           ? std::nullopt
           : std::optional<std::string>(latest_.detectedCourse.toStdString());
   if (auto lockedCourse =
-          courseGate_.observe(courseObs, uint64_t(clock_.elapsed()), !reviewing_)) {
+          courseGate_.observe(courseObs, uint64_t(clock_.elapsed()), true)) {
     const QString course = QString::fromStdString(*lockedCourse);
     currentCourse_ = course;
     updateCourseDisplay();
@@ -932,6 +946,22 @@ void MainDock::receiveAnalysis(Analysis result, uint64_t generation, qint64 dura
     standingsRequestActive_ = false;
     requestIssued_ = false;
     requestCycle_ = gate_.cycle();
+  }
+  if (reviewing_) {
+    const bool editingPast =
+        (editMode_ == EditMode::ExistingRace || editMode_ == EditMode::PendingFirstRace) &&
+        !retryInFlight_;
+    if (editingPast && stable && !requestIssued_ && !api_->busy() && !userTouchedReview_) {
+      cancelReview();
+    } else if (editingPast && (clock_.elapsed() - reviewOpenedMs_) >= 60000) {
+      cancelReview();
+      if (!latestImage_.isNull())
+        updatePreview(latestImage_);
+      setStatus(tr("編集画面を1分間操作しなかったため、ライブ監視へ戻りました。"));
+      return;
+    } else {
+      return;
+    }
   }
   const bool readerBusy = api_->busy();
   if (readerBusy) {
@@ -1012,6 +1042,7 @@ void MainDock::requestRetryRecognition() {
   const auto captured = pending_;
   const auto mode = editMode_;
   const int editIdx = editingRaceIndex_;
+  retryInFlight_ = true;
   retryRead_->setEnabled(false);
   confirm_->setEnabled(false);
   preview_->setEnabled(false);
@@ -1019,6 +1050,7 @@ void MainDock::requestRetryRecognition() {
   const auto manualSelections = currentEditorStandings();
   api_->read(captured, session_.tags(),
              [this, generation, mode, editIdx, manualSelections](Analysis result) {
+    retryInFlight_ = false;
     if (!reviewing_ || generation != generation_)
       return;
     applyPlayerOverrides(result, playerOverrides_, session_.tags());
@@ -1254,12 +1286,15 @@ void MainDock::requestStandingsVerification(const Analysis &captured) {
 void MainDock::review(const Analysis &analysis, EditMode mode, int raceIndex) {
   if (analysis.standings.size() != 12)
     return;
-  ++generation_;
+  if (mode == EditMode::NewRace || mode == EditMode::CumulativeReconcile)
+    ++generation_;
   pending_ = analysis;
   reviewing_ = true;
   editMode_ = mode;
   editingRaceIndex_ = raceIndex;
   userTouchedReview_ = false;
+  retryInFlight_ = false;
+  reviewOpenedMs_ = clock_.elapsed();
   if (raceSelector_)
     raceSelector_->setEnabled(false);
   if (editRace_)
@@ -1597,13 +1632,17 @@ void MainDock::confirmPending() {
 }
 
 void MainDock::cancelReview() {
-  ++generation_;
-  if (api_->busy())
-    api_->cancel();
+  if (retryInFlight_) {
+    ++generation_;
+    if (api_->busy())
+      api_->cancel();
+  }
+  retryInFlight_ = false;
   reviewing_ = false;
   editMode_ = EditMode::None;
   editingRaceIndex_ = -1;
   userTouchedReview_ = false;
+  reviewOpenedMs_ = 0;
   pending_ = {};
   reviewBaselineStandings_.clear();
   preview_->setEditing(false);

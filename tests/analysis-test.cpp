@@ -362,9 +362,24 @@ void tests() {
     require(quickscore::CourseRecognizer::matchCourseName("ウォーター パーク") ==
                 std::optional<std::string>("ウォーターパーク"),
             "course match strips whitespace");
-    require(quickscore::CourseRecognizer::matchCourseName("クラウトカーテン") ==
-                std::optional<std::string>("クラウドガーデン"),
-            "course match tolerates voiced/unvoiced kana errors");
+    require(quickscore::CourseRecognizer::matchCourseName("スカイカーテン") ==
+                std::optional<std::string>("スカイガーデン"),
+            "course match tolerates voiced/unvoiced kana errors for Sky Garden");
+    require(quickscore::CourseRecognizer::matchCourseName("スカイガーデン") ==
+                std::optional<std::string>("スカイガーデン"),
+            "normal Sky Garden must not become GBA");
+    require(quickscore::CourseRecognizer::matchCourseName("マリオサーキット3") ==
+                std::optional<std::string>("SFCマリオサーキット3"),
+            "SFC Mario Circuit 3 matches without prefix");
+    require(quickscore::CourseRecognizer::matchCourseName("5FCマリオサーキット3") ==
+                std::optional<std::string>("SFCマリオサーキット3"),
+            "SFC Mario Circuit 3 normalizes 5FC prefix");
+    require(quickscore::CourseRecognizer::matchCourseName("SEC マリオサーキット3") ==
+                std::optional<std::string>("SFCマリオサーキット3"),
+            "SFC Mario Circuit 3 normalizes SEC prefix");
+    require(quickscore::CourseRecognizer::matchCourseName("マリオサーキット") ==
+                std::optional<std::string>("マリオサーキット"),
+            "normal Mario Circuit stays distinct from SFC3");
     require(quickscore::CourseRecognizer::matchCourseName("クラクラかさん") ==
                 std::optional<std::string>("グラグラかざん"),
             "course match tolerates voiced hiragana/katakana mix");
@@ -415,6 +430,49 @@ void tests() {
                 cg.observe(std::string("ビッグブルー"), 1500) ==
                     std::optional<std::string>("ビッグブルー"),
             "CourseGate resets between races");
+    cg.reset();
+    require(cg.observe(std::string("サンセットこうや"), 1700) == std::nullopt &&
+                cg.observe(std::nullopt, 1850) == std::nullopt &&
+                cg.observe(std::string("サンセットこうや"), 2000) ==
+                    std::optional<std::string>("サンセットこうや"),
+            "CourseGate tolerates a single transient OCR miss");
+    cg.reset();
+    require(cg.observe(std::string("サンセットこうや"), 2200) == std::nullopt &&
+                cg.observe(std::nullopt, 2350) == std::nullopt &&
+                cg.observe(std::nullopt, 2500) == std::nullopt &&
+                cg.observe(std::string("サンセットこうや"), 2650) == std::nullopt,
+            "CourseGate resets after two consecutive OCR misses");
+
+    quickscore::CourseRecognizer cr;
+    const std::vector<std::pair<QString, std::string>> realCourseFixtures = {
+        {QStringLiteral("C:/Users/koto/Downloads/Screenshot 2026-09-05 22-36-24.png"),
+         "ワリオスタジアム"},
+        {QStringLiteral("C:/Users/koto/Downloads/Screenshot 2026-09-05 22-38-27.png"),
+         "ニンニンドージョー"},
+        {QStringLiteral("C:/Users/koto/Downloads/Screenshot 2026-09-05 22-38-49.png"),
+         "カラカラさばく"},
+        {QStringLiteral("C:/Users/koto/Downloads/Screenshot 2026-09-06 15-05-28.png"),
+         "シャーベットランド"},
+        {QStringLiteral("C:/Users/koto/Downloads/Screenshot 2026-09-06 15-05-39.png"),
+         "ツルツルツイスター"},
+        {QStringLiteral("C:/Users/koto/Downloads/Screenshot 2026-09-06 15-05-49.png"),
+         "ネオクッパシティ"},
+        {QStringLiteral("C:/Users/koto/Documents/Codex/2026-09-05/cod/work/test_sfc_mc3_1450.png"),
+         "SFCマリオサーキット3"},
+        {QStringLiteral("C:/Users/koto/Downloads/Screenshot 2026-11-10 SFC-Mario-Circuit-3.png"),
+         "SFCマリオサーキット3"},
+    };
+    for (const auto &[path, expected] : realCourseFixtures) {
+      if (QFile::exists(path)) {
+        const QImage img(path);
+        require(!img.isNull(), "load real course screenshot fixture");
+        require(quickscore::CourseRecognizer::isCourseScreen(img),
+                "real course screenshot detected by isCourseScreen");
+        const auto got = cr.recognize(img);
+        require(got == std::optional<std::string>(expected),
+                "real course screenshot matched canonical name");
+      }
+    }
   }
 
   {

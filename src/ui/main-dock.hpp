@@ -155,6 +155,8 @@ private:
   EditMode editMode_ = EditMode::None;
   int editingRaceIndex_ = -1;
   bool userTouchedReview_ = false;
+  bool retryInFlight_ = false;
+  qint64 reviewOpenedMs_ = 0;
   bool standingsRequestActive_ = false;
   int standingsStableCount_ = 0;
   qint64 standingsFirstMs_ = 0;
