@@ -20,12 +20,16 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
+#include <utility>
+#include <vector>
 class QComboBox;
 class QLineEdit;
 class QLabel;
 class QPushButton;
 class QCheckBox;
+class QSpinBox;
 namespace quickscore {
 class ResultPreviewWidget final : public QWidget {
   Q_OBJECT
@@ -89,6 +93,7 @@ private:
   void refreshSources();
   std::vector<std::string> configuredTags() const;
   int configuredPlayersPerTeam() const;
+  int targetTotalRaces() const;
   void updateDetectedFormat();
   void startAggregation();
   void stopAggregation(bool autoFinished = false, bool syncOverlay = true);
@@ -101,9 +106,11 @@ private:
   void confirmPending();
   void cancelReview();
   bool commit(const std::vector<Standing> &standings, bool corrected, const Analysis &raw,
-              QString *eventNote = nullptr);
+              QString *eventNote = nullptr, std::optional<QString> courseOverride = std::nullopt);
   void updateScores();
   void updateCourseDisplay();
+  void clearCurrentCourse();
+  QString editedReviewCourse() const;
   void refreshRaceHistory();
   void openSelectedRaceEditor();
   std::vector<Standing> currentEditorStandings() const;
@@ -116,12 +123,13 @@ private:
   void requestStandingsVerification(const Analysis &captured);
   void requestRetryRecognition();
   void learnOverridesFromReview(const std::vector<Standing> &confirmed);
-  void syncDiscord(bool postToDiscord = true);
+  void syncDiscord(bool postToDiscord = true, bool resetMatch = false);
   void syncDiscordCourse(const QString &course);
-  QJsonObject buildLoungePayload(bool postToDiscord) const;
+  QJsonObject buildLoungePayload(bool postToDiscord, bool resetMatch = false) const;
 
   QString configDirectory_, savedSource_;
-  QComboBox *source_{}, *raceSelector_{};
+  QComboBox *source_{}, *raceSelector_{}, *reviewCourse_{};
+  QSpinBox *totalRaces_{};
   QLabel *detectedFormat_{};
   QLineEdit *tags_{};
   std::unique_ptr<JevApiReader> api_;
@@ -131,6 +139,7 @@ private:
   std::unique_ptr<DiscordSender> discord_;
   bool hasTestDiscordEndpoint_ = false;
   QLabel *status_{}, *diagnostic_{}, *courseLabel_{}, *scores_{}, *reviewHelp_{};
+  QWidget *reviewCourseRow_{};
   ResultPreviewWidget *preview_{};
   QPushButton *start_{}, *stop_{}, *refresh_{}, *confirm_{}, *cancel_{}, *retryRead_{}, *editRace_{};
   std::unique_ptr<FrameCapture> capture_;
@@ -143,6 +152,7 @@ private:
   ResultGate gate_;
   CourseGate courseGate_;
   QString currentCourse_, lastSentCourse_;
+  std::vector<std::pair<int, QString>> heldRaces_;
   Analysis latest_, pending_;
   std::vector<TagSample> playerOverrides_;
   std::vector<Standing> reviewBaselineStandings_;

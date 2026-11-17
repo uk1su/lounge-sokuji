@@ -469,4 +469,15 @@ void CourseGate::reset() {
   lastTimeMs_ = 0;
 }
 
+const std::vector<std::string> &canonicalCourseNames() {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> out;
+    out.reserve(std::size(kCourseDefinitions));
+    for (const auto &entry : kCourseDefinitions)
+      out.emplace_back(entry.canonical);
+    return out;
+  }();
+  return names;
+}
+
 } // namespace quickscore

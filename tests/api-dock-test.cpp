@@ -19,6 +19,7 @@
 #include <QPalette>
 #include <QPushButton>
 #include <QSettings>
+#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QThread>
 #include <iostream>
@@ -355,11 +356,21 @@ int main(int argc, char **argv) {
     require(jevApi.count == 6, "no automatic retries");
     require(dock->grab().save(args[6]), "API UI preview");
     dock->findChild<QPushButton *>("cancel")->click();
-    stop->click();
     elapsed.restart();
     while (discordApi.count < 6 && elapsed.elapsed() < 5000)
       pump(blank, 50);
-    require(discordApi.count == 6, "manual stop syncs inactive overlay state");
+    require(discordApi.count == 6, "skipping NewRace posts held race notice to Discord");
+    const auto skipDiscordJson =
+        QJsonDocument::fromJson(discordApi.request.mid(discordApi.request.indexOf("\r\n\r\n") + 4))
+            .object();
+    require(skipDiscordJson["held_races"].toArray().size() == 1 &&
+                skipDiscordJson["held_races"].toArray().at(0).toObject()["number"].toInt() == 5,
+            "held_races payload records skipped 5th race");
+    stop->click();
+    elapsed.restart();
+    while (discordApi.count < 7 && elapsed.elapsed() < 5000)
+      pump(blank, 50);
+    require(discordApi.count == 7, "manual stop syncs inactive overlay state");
     const auto stopDiscordJson =
         QJsonDocument::fromJson(discordApi.request.mid(discordApi.request.indexOf("\r\n\r\n") + 4))
             .object();
@@ -370,6 +381,9 @@ int main(int argc, char **argv) {
     editRace->click();
     require(preview->isEditing() && preview->hasPreview() && preview->hasTagStrip(),
             "editRace opens clickable right-side tag editor for 1R");
+    auto *reviewCourse = dock->findChild<QComboBox *>("reviewCourse");
+    require(reviewCourse && reviewCourse->isVisible(), "reviewCourse editor visible");
+    reviewCourse->setCurrentText(QStringLiteral("ミュートシティ"));
     require(dock->grab().save(args[6] + ".edit.png"), "edit UI preview with right-side tags");
     preview->setRowTag(0, QStringLiteral("う"));
     preview->setRowTag(1, QStringLiteral("M"));
@@ -378,12 +392,25 @@ int main(int argc, char **argv) {
         "う 71 (-6)／【M】65／L 64 (+1)／A 56 (+9)／B 36 (+29)／R 36 (+29)／現在2位／＠8");
     require(scores->text() == editedLine && !preview->isEditing(),
             "editing 1R updates total scores immediately");
-    require(raceHistory->itemText(0).contains(QStringLiteral("補正済み")),
-            "race history marks corrected race");
+    require(raceHistory->itemText(0).contains(QStringLiteral("ミュートシティ")) &&
+                raceHistory->itemText(0).contains(QStringLiteral("補正済み")),
+            "race history shows edited course name and corrected badge");
     elapsed.restart();
-    while (discordApi.count < 7 && elapsed.elapsed() < 5000)
+    while (discordApi.count < 8 && elapsed.elapsed() < 5000)
       pump(blank, 50);
-    require(discordApi.count == 7, "editing 1R syncs corrected totals to Discord");
+    require(discordApi.count == 8, "editing 1R syncs corrected totals and course to Discord");
+    auto *totalRacesSpin = dock->findChild<QSpinBox *>("totalRaces");
+    require(totalRacesSpin && totalRacesSpin->value() == 12, "default totalRaces is 12");
+    totalRacesSpin->setValue(8);
+    require(scores->text().endsWith(QStringLiteral("／＠4")),
+            "lowering totalRaces updates remaining race count immediately");
+    elapsed.restart();
+    while (discordApi.count < 9 && elapsed.elapsed() < 5000)
+      pump(blank, 50);
+    totalRacesSpin->setValue(12);
+    elapsed.restart();
+    while (discordApi.count < 10 && elapsed.elapsed() < 5000)
+      pump(blank, 50);
     require(dock->overlayPort() > 0, "overlay HTTP server bound to localhost port");
     require(QFile::exists(config.path() + "/overlay.html") &&
                 QFile::exists(config.path() + "/overlay-state.json") &&

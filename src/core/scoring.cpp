@@ -188,6 +188,13 @@ bool Session::replaceRace(size_t index, std::vector<Standing> standings, bool co
   return true;
 }
 
+bool Session::setRaceCourse(size_t index, std::string course)
+{
+  if (index >= races_.size() || races_[index].raceSpan != 1) return false;
+  races_[index].course = std::move(course);
+  return true;
+}
+
 void Session::deferFirstRace(std::vector<Standing> partialStandings, std::string course)
 {
   if (!races_.empty() || pendingFirstRace_) return;

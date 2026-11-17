@@ -44,7 +44,9 @@ public:
               std::string course = {});
   bool replaceRace(size_t index, std::vector<Standing> standings, bool corrected,
                    ValidationResult *failure = nullptr);
+  bool setRaceCourse(size_t index, std::string course);
   void deferFirstRace(std::vector<Standing> partialStandings, std::string course = {});
+  void setPendingFirstRaceCourse(std::string course) { pendingFirstRaceCourse_ = std::move(course); }
   bool resolvePendingFirstRaceManually(std::vector<Standing> standings, bool corrected,
                                        ValidationResult *failure = nullptr);
   bool reconcileWithCumulativeTotals(const std::map<std::string, int> &gameTotals,
@@ -63,6 +65,7 @@ public:
   const std::vector<RaceResult> &races() const { return races_; }
   bool hasAutoConfirmedRace() const;
   bool hasPendingFirstRace() const { return pendingFirstRace_; }
+  const std::string &pendingFirstRaceCourse() const { return pendingFirstRaceCourse_; }
   const std::vector<Standing> &pendingFirstRaceStandings() const {
     return pendingFirstRaceStandings_;
   }

@@ -6,8 +6,11 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace quickscore {
+
+const std::vector<std::string> &canonicalCourseNames();
 
 class CourseRecognizer {
 public:

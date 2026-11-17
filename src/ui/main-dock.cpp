@@ -22,6 +22,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QSignalBlocker>
+#include <QSpinBox>
 #include <QTextStream>
 #include <QTimer>
 #include <QToolTip>
@@ -401,12 +403,23 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   srcLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   auto *tagLbl = new QLabel(tr("タグ"));
   tagLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  auto *racesLbl = new QLabel(tr("レース数"));
+  racesLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  totalRaces_ = new QSpinBox;
+  totalRaces_->setObjectName("totalRaces");
+  totalRaces_->setRange(1, 48);
+  totalRaces_->setValue(12);
+  totalRaces_->setSuffix(tr("R"));
+  totalRaces_->setToolTip(tr("Lounge即時の総レース数（通常12R）"));
+  totalRaces_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   form->addWidget(srcLbl, 0, 0);
   form->addWidget(source_, 0, 1);
   form->addWidget(refresh_, 0, 2);
   form->addWidget(tagLbl, 1, 0);
   form->addWidget(tags_, 1, 1);
   form->addWidget(detectedFormat_, 1, 2);
+  form->addWidget(racesLbl, 2, 0);
+  form->addWidget(totalRaces_, 2, 1);
   form->setColumnStretch(1, 1);
   layout->addWidget(setup);
 
@@ -459,6 +472,26 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   reviewHelp_->hide();
   layout->addWidget(reviewHelp_);
 
+  reviewCourse_ = new QComboBox;
+  reviewCourse_->setObjectName("reviewCourse");
+  reviewCourse_->setEditable(true);
+  reviewCourse_->setInsertPolicy(QComboBox::NoInsert);
+  reviewCourse_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  reviewCourse_->setMinimumContentsLength(6);
+  reviewCourse_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  reviewCourse_->addItem(tr("未設定"), QString{});
+  for (const auto &name : canonicalCourseNames()) {
+    const QString qname = QString::fromStdString(name);
+    reviewCourse_->addItem(qname, qname);
+  }
+  if (auto *le = reviewCourse_->lineEdit())
+    le->setPlaceholderText(tr("コース名（任意・略称可）"));
+  auto *courseEditLbl = new QLabel(tr("コース"));
+  courseEditLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  reviewCourseRow_ = buttons({courseEditLbl, reviewCourse_});
+  reviewCourseRow_->hide();
+  layout->addWidget(reviewCourseRow_);
+
   confirm_ = new QPushButton(tr("確定して集計"));
   cancel_ = new QPushButton(tr("スキップ"));
   retryRead_ = new QPushButton(tr("再判定"));
@@ -503,21 +536,58 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
 
   connect(refresh_, &QPushButton::clicked, this, [this] { refreshSources(); });
   connect(tags_, &QLineEdit::textChanged, this, [this] { updateDetectedFormat(); });
+  connect(totalRaces_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this] {
+    saveSettings();
+    updateScores();
+    if (running_ || !session_.races().empty() || session_.hasPendingFirstRace()) {
+      const bool autoFinished = checkAutoFinish(false);
+      if (postDiscord_->isChecked())
+        syncDiscord(!session_.races().empty() || autoFinished);
+    }
+  });
+  connect(reviewCourse_, &QComboBox::currentTextChanged, this, [this] {
+    if (reviewing_) {
+      userTouchedReview_ = true;
+      reviewOpenedMs_ = clock_.elapsed();
+    }
+  });
   connect(start_, &QPushButton::clicked, this, [this] { startAggregation(); });
   connect(stop_, &QPushButton::clicked, this, [this] { stopAggregation(); });
   connect(confirm_, &QPushButton::clicked, this, [this] { confirmPending(); });
   connect(retryRead_, &QPushButton::clicked, this, [this] { requestRetryRecognition(); });
   connect(cancel_, &QPushButton::clicked, this, [this] {
     const auto prevMode = editMode_;
-    if (prevMode == EditMode::NewRace)
+    QString skippedCourse;
+    int skippedRaceNo = 0;
+    if (prevMode == EditMode::NewRace) {
       gate_.lock();
+      skippedRaceNo = int(session_.effectiveRaceCount()) + 1;
+      skippedCourse = editedReviewCourse();
+      if (skippedCourse.isEmpty())
+        skippedCourse = !pending_.detectedCourse.isEmpty() ? pending_.detectedCourse : currentCourse_;
+      auto it = std::find_if(heldRaces_.begin(), heldRaces_.end(),
+                             [skippedRaceNo](const auto &item) { return item.first == skippedRaceNo; });
+      if (it != heldRaces_.end())
+        it->second = skippedCourse;
+      else
+        heldRaces_.emplace_back(skippedRaceNo, skippedCourse);
+      clearCurrentCourse();
+      updateScores();
+    }
     cancelReview();
-    if (prevMode == EditMode::NewRace)
-      setStatus(tr("スキップしました。次のレースを待機します。"));
-    else if (prevMode == EditMode::CumulativeReconcile)
+    if (prevMode == EditMode::NewRace) {
+      if (postDiscord_->isChecked())
+        syncDiscord(true);
+      setStatus(skippedCourse.isEmpty()
+                    ? tr("第%1レースを保留（スキップ）し、次のレースを待機します。").arg(skippedRaceNo)
+                    : tr("第%1レース（%2）を保留（スキップ）し、次のレースを待機します。")
+                          .arg(skippedRaceNo)
+                          .arg(skippedCourse));
+    } else if (prevMode == EditMode::CumulativeReconcile) {
       setStatus(tr("総合順位表の検算をスキップしました。"));
-    else
+    } else {
       setStatus(tr("修正をキャンセルしました。"));
+    }
   });
   connect(reset, &QPushButton::clicked, this, [this] { resetSession(); });
   connect(editRace_, &QPushButton::clicked, this, [this] { openSelectedRaceEditor(); });
@@ -680,6 +750,10 @@ int MainDock::configuredPlayersPerTeam() const {
   return playersForTeamCount(configuredTags().size());
 }
 
+int MainDock::targetTotalRaces() const {
+  return totalRaces_ ? std::clamp(totalRaces_->value(), 1, 48) : 12;
+}
+
 void MainDock::updateDetectedFormat() {
   if (!detectedFormat_)
     return;
@@ -715,9 +789,7 @@ void MainDock::stopAggregation(bool autoFinished, bool syncOverlay) {
   api_->cancel();
   capture_->stop();
   gate_.pause();
-  courseGate_.reset();
-  currentCourse_.clear();
-  updateCourseDisplay();
+  clearCurrentCourse();
   standingsRequestActive_ = false;
   standingsStableCount_ = 0;
   standingsLastTotal_ = -1;
@@ -733,10 +805,14 @@ void MainDock::stopAggregation(bool autoFinished, bool syncOverlay) {
 }
 
 bool MainDock::checkAutoFinish(bool syncOverlay) {
-  if (!running_ || session_.effectiveRaceCount() < 12)
+  const int totalRaces = targetTotalRaces();
+  if (!running_ || int(session_.effectiveRaceCount()) < totalRaces)
     return false;
+  loungeOverlayActive_ = true;
+  if (!loungeOverlayUntilUtc_.isValid())
+    loungeOverlayUntilUtc_ = QDateTime::currentDateTimeUtc().addSecs(60);
   stopAggregation(true, syncOverlay);
-  setStatus(tr("12レース終了したため自動停止しました。"));
+  setStatus(tr("%1レース終了したため自動停止しました。").arg(totalRaces));
   return true;
 }
 
@@ -1153,15 +1229,14 @@ void MainDock::requestRecognition(const Analysis &captured) {
       QString saveError;
       if (storeSession(configDirectory_ + "/session.json", proposed, audit_, saveError)) {
         session_ = std::move(proposed);
-        currentCourse_.clear();
-        lastSentCourse_.clear();
-        courseGate_.reset();
-        updateCourseDisplay();
+        clearCurrentCourse();
         lastCommittedFrame_ = captured.image;
         lastCommittedStandings_ = latest_.standings;
         updateScores();
         refreshRaceHistory();
         updatePreview(captured.image, latest_.standings);
+        if (postDiscord_->isChecked())
+          syncDiscord(true);
         setStatus(tr("1レース目で未一致・エラーがあったため保留しました（名前修正待ち）。2レース"
                      "目以降を継続し、名前が直り次第 総合順位表から自動回収します。"),
                   "#ffb74d");
@@ -1320,6 +1395,31 @@ void MainDock::review(const Analysis &analysis, EditMode mode, int raceIndex) {
   }
   for (auto *w : std::initializer_list<QWidget *>{confirm_, cancel_, retryRead_})
     w->show();
+  if (reviewCourseRow_ && reviewCourse_) {
+    const bool showCourseEdit = (mode != EditMode::CumulativeReconcile);
+    reviewCourseRow_->setVisible(showCourseEdit);
+    if (showCourseEdit) {
+      QString initialCourse;
+      if (mode == EditMode::ExistingRace && raceIndex >= 0 &&
+          size_t(raceIndex) < session_.races().size()) {
+        initialCourse = QString::fromStdString(session_.races()[size_t(raceIndex)].course);
+      } else if (mode == EditMode::PendingFirstRace) {
+        initialCourse = QString::fromStdString(session_.pendingFirstRaceCourse());
+      } else {
+        initialCourse = !pending_.detectedCourse.isEmpty() ? pending_.detectedCourse : currentCourse_;
+      }
+      const QSignalBlocker blocker(reviewCourse_);
+      if (initialCourse.isEmpty()) {
+        reviewCourse_->setCurrentIndex(0);
+      } else {
+        const int idx = reviewCourse_->findData(initialCourse);
+        if (idx >= 0)
+          reviewCourse_->setCurrentIndex(idx);
+        else
+          reviewCourse_->setCurrentText(initialCourse);
+      }
+    }
+  }
   reviewHelp_->hide();
   if (mode == EditMode::ExistingRace || mode == EditMode::PendingFirstRace) {
     retryRead_->setVisible(!pending_.image.isNull() && api_->configurationError().isEmpty());
@@ -1392,12 +1492,19 @@ void MainDock::refreshRaceHistory() {
     return;
   const int prevData = raceSelector_->count() > 0 ? raceSelector_->currentData().toInt() : -99;
   raceSelector_->clear();
-  if (session_.hasPendingFirstRace())
-    raceSelector_->addItem(tr("1R (未確定・名前待ち)"), -1);
+  if (session_.hasPendingFirstRace()) {
+    QString pendingText = tr("1R");
+    if (!session_.pendingFirstRaceCourse().empty())
+      pendingText += tr(" - %1").arg(QString::fromStdString(session_.pendingFirstRaceCourse()));
+    pendingText += tr(" (未確定・名前待ち)");
+    raceSelector_->addItem(pendingText, -1);
+  }
   const auto &races = session_.races();
   for (size_t i = 0; i < races.size(); ++i) {
     QString text = races[i].label.empty() ? tr("%1R").arg(races[i].number)
                                           : QString::fromStdString(races[i].label);
+    if (!races[i].course.empty())
+      text += tr(" - %1").arg(QString::fromStdString(races[i].course));
     if (races[i].corrected && races[i].raceSpan <= 1)
       text += tr(" (補正済み)");
     raceSelector_->addItem(text, int(i));
@@ -1487,10 +1594,13 @@ void MainDock::confirmPending() {
     Session proposed = session_;
     if (editIdx < 0 || !proposed.replaceRace(size_t(editIdx), standings, true))
       return;
+    const QString editedCourse = editedReviewCourse();
+    proposed.setRaceCourse(size_t(editIdx), editedCourse.toStdString());
     const int raceNumber = proposed.races()[size_t(editIdx)].number;
     auto audit = audit_;
     if (editIdx < audit.size()) {
       auto obj = audit[editIdx].toObject();
+      obj.insert("course", editedCourse);
       obj.insert("corrected", true);
       obj.insert("editedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
       audit[editIdx] = obj;
@@ -1518,12 +1628,15 @@ void MainDock::confirmPending() {
 
   if (editMode_ == EditMode::PendingFirstRace) {
     Session proposed = session_;
+    const QString editedCourse = editedReviewCourse();
+    proposed.setPendingFirstRaceCourse(editedCourse.toStdString());
     if (!proposed.resolvePendingFirstRaceManually(standings, true))
       return;
     auto audit = audit_;
     QJsonObject entry = pendingFirstAudit_;
     if (entry.isEmpty())
       entry = QJsonObject{{"race", 1}};
+    entry.insert("course", editedCourse);
     entry.insert("corrected", true);
     entry.insert("committedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
     audit.prepend(entry);
@@ -1622,7 +1735,11 @@ void MainDock::confirmPending() {
   }
 
   QString eventNote;
-  if (!commit(standings, true, pending_, &eventNote))
+  const std::optional<QString> courseOverride =
+      (reviewCourseRow_ && !reviewCourseRow_->isHidden())
+          ? std::optional<QString>(editedReviewCourse())
+          : std::nullopt;
+  if (!commit(standings, true, pending_, &eventNote, courseOverride))
     return;
   learnOverridesFromReview(standings);
   gate_.lock();
@@ -1652,13 +1769,15 @@ void MainDock::cancelReview() {
   confirm_->setText(tr("確定して集計"));
   cancel_->setText(tr("スキップ"));
   reviewHelp_->setText(tr("右のバッジをクリックしてチームを選択してください。"));
-  for (auto *w : std::initializer_list<QWidget *>{reviewHelp_, confirm_, cancel_, retryRead_})
-    w->hide();
+  for (auto *w : std::initializer_list<QWidget *>{reviewHelp_, reviewCourseRow_, confirm_,
+                                                 cancel_, retryRead_})
+    if (w)
+      w->hide();
   refreshRaceHistory();
 }
 
 bool MainDock::commit(const std::vector<Standing> &standings, bool corrected, const Analysis &raw,
-                      QString *eventNote) {
+                      QString *eventNote, std::optional<QString> courseOverride) {
   Session proposed = session_;
   auto audit = audit_;
   QString note;
@@ -1701,7 +1820,9 @@ bool MainDock::commit(const std::vector<Standing> &standings, bool corrected, co
     }
   }
 
-  const QString raceCourse = !raw.detectedCourse.isEmpty() ? raw.detectedCourse : currentCourse_;
+  const QString raceCourse = courseOverride.has_value()
+                                 ? *courseOverride
+                                 : (!raw.detectedCourse.isEmpty() ? raw.detectedCourse : currentCourse_);
   if (!proposed.commit(standings, corrected, nullptr, raceCourse.toStdString()))
     return false;
   audit.append(
@@ -1722,16 +1843,13 @@ bool MainDock::commit(const std::vector<Standing> &standings, bool corrected, co
   audit_ = audit;
   if (eventNote)
     *eventNote = note;
-  currentCourse_.clear();
-  lastSentCourse_.clear();
-  courseGate_.reset();
-  updateCourseDisplay();
+  clearCurrentCourse();
   lastCommittedFrame_ = raw.image;
   lastCommittedStandings_ = standings;
   updateScores();
   refreshRaceHistory();
   updatePreview(raw.image, standings);
-  if (running_ && session_.effectiveRaceCount() >= 12) {
+  if (running_ && int(session_.effectiveRaceCount()) >= targetTotalRaces()) {
     loungeOverlayActive_ = true;
     loungeOverlayUntilUtc_ = QDateTime::currentDateTimeUtc().addSecs(60);
   }
@@ -1772,10 +1890,8 @@ void MainDock::resetSession() {
   verifiedRaceCount_ = 0;
   standingsCheckedRace_ = -1;
   standingsCheckedTotal_ = -1;
-  currentCourse_.clear();
-  lastSentCourse_.clear();
-  courseGate_.reset();
-  updateCourseDisplay();
+  heldRaces_.clear();
+  clearCurrentCourse();
   lastCommittedFrame_ = {};
   lastCommittedStandings_.clear();
   updateScores();
@@ -1783,8 +1899,26 @@ void MainDock::resetSession() {
   loungeOverlayActive_ = false;
   loungeOverlayUntilUtc_ = {};
   if (postDiscord_->isChecked())
-    syncDiscord();
+    syncDiscord(true, true);
   setStatus(tr("集計をリセットしました。次のレースを待機します。"));
+}
+
+void MainDock::clearCurrentCourse() {
+  currentCourse_.clear();
+  lastSentCourse_.clear();
+  courseGate_.reset();
+  updateCourseDisplay();
+}
+
+QString MainDock::editedReviewCourse() const {
+  if (!reviewCourse_)
+    return {};
+  const QString raw = reviewCourse_->currentText().trimmed();
+  if (raw.isEmpty() || raw == tr("未設定"))
+    return {};
+  if (const auto matched = CourseRecognizer::matchCourseName(raw.toStdString()))
+    return QString::fromStdString(*matched);
+  return raw;
 }
 
 void MainDock::updateCourseDisplay() {
@@ -1797,7 +1931,9 @@ void MainDock::updateCourseDisplay() {
 void MainDock::updateScores() {
   const auto totals = session_.totals();
   const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
-  const QString scoreLine = formatScoreLine(activeTags, totals, session_.effectiveRaceCount(), 12);
+  const int totalRaces = targetTotalRaces();
+  const QString scoreLine =
+      formatScoreLine(activeTags, totals, session_.effectiveRaceCount(), totalRaces);
   scores_->setText(scoreLine);
 
   {
@@ -1814,7 +1950,7 @@ void MainDock::updateScores() {
   }
 
   const OverlayState overlay = buildOverlayState(
-      activeTags, totals, session_.effectiveRaceCount(), 12, ++overlayRevision_);
+      activeTags, totals, session_.effectiveRaceCount(), totalRaces, ++overlayRevision_);
   const QImage image = renderOverlayImage(overlay);
   std::vector<uint8_t> pixels(image.constBits(),
                               image.constBits() + size_t(image.bytesPerLine() * image.height()));
@@ -1837,7 +1973,7 @@ void MainDock::updateScores() {
   writeOverlayFile(QStringLiteral("overlay-state.js"), stateJs);
 }
 
-QJsonObject MainDock::buildLoungePayload(bool postToDiscord) const {
+QJsonObject MainDock::buildLoungePayload(bool postToDiscord, bool resetMatch) const {
   const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
   const int players =
       session_.tags().empty() ? configuredPlayersPerTeam() : session_.playersPerTeam();
@@ -1872,6 +2008,11 @@ QJsonObject MainDock::buildLoungePayload(bool postToDiscord) const {
     racesJson.append(raceObj);
   }
 
+  QJsonArray heldJson;
+  for (const auto &held : heldRaces_) {
+    heldJson.append(QJsonObject{{"number", held.first}, {"course", held.second}});
+  }
+
   QString channelId = QString::fromUtf8(QUICKSCORE_EMBEDDED_BOT_CHANNEL_ID).trimmed();
   if (channelId.isEmpty())
     channelId = QStringLiteral("1571454531814952971");
@@ -1884,16 +2025,22 @@ QJsonObject MainDock::buildLoungePayload(bool postToDiscord) const {
                   {"races", racesJson},
                   {"current_course", currentCourse_},
                   {"race_count", int(session_.effectiveRaceCount())},
-                  {"total_races", 12},
+                  {"total_races", targetTotalRaces()},
                   {"score_line", scores_->text()},
+                  {"pending_first_race", session_.hasPendingFirstRace()},
+                  {"pending_first_course",
+                   QString::fromStdString(session_.pendingFirstRaceCourse())},
+                  {"held_races", heldJson},
                   {"active", loungeOverlayActive_},
                   {"post_to_discord", postToDiscord}};
+  if (resetMatch)
+    obj.insert("event", QStringLiteral("reset"));
   if (loungeOverlayUntilUtc_.isValid())
     obj.insert("active_until", loungeOverlayUntilUtc_.toString(Qt::ISODate));
   return obj;
 }
 
-void MainDock::syncDiscord(bool postToDiscord) {
+void MainDock::syncDiscord(bool postToDiscord, bool resetMatch) {
   if (!discord_ || !postDiscord_ || !postDiscord_->isChecked())
     return;
   if (!hasTestDiscordEndpoint_ && !QSslSocket::supportsSsl()) {
@@ -1908,7 +2055,7 @@ void MainDock::syncDiscord(bool postToDiscord) {
     if (ingestKey.isEmpty())
       ingestKey = QStringLiteral("test-ingest-key");
   }
-  const auto payload = buildLoungePayload(postToDiscord);
+  const auto payload = buildLoungePayload(postToDiscord, resetMatch);
   discord_->sendLounge(QUrl(endpointStr), ingestKey, payload,
                        [this](bool ok, const QString &message) {
                          if (!ok)
@@ -1946,11 +2093,17 @@ void MainDock::saveSettings() {
   s.setValue("sourceKey", source_->currentData());
   s.setValue("tags", tags_->text());
   s.setValue("postToDiscordChannel", postDiscord_->isChecked());
+  if (totalRaces_)
+    s.setValue("totalRaces", totalRaces_->value());
 }
 
 void MainDock::loadSettings() {
   QSettings s(configDirectory_ + "/settings.ini", QSettings::IniFormat);
   tags_->setText(s.value("tags", "A, B, C, D").toString());
+  if (totalRaces_) {
+    const QSignalBlocker blocker(totalRaces_);
+    totalRaces_->setValue(std::clamp(s.value("totalRaces", 12).toInt(), 1, 48));
+  }
   updateDetectedFormat();
   savedSource_ = s.value("schema", 0).toInt() >= 5 ? s.value("sourceKey").toString() : QString{};
   postDiscord_->setChecked(s.value("postToDiscordChannel", false).toBool());
