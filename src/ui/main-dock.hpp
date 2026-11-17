@@ -29,7 +29,6 @@ class QLineEdit;
 class QLabel;
 class QPushButton;
 class QCheckBox;
-class QSpinBox;
 namespace quickscore {
 class ResultPreviewWidget final : public QWidget {
   Q_OBJECT
@@ -93,7 +92,6 @@ private:
   void refreshSources();
   std::vector<std::string> configuredTags() const;
   int configuredPlayersPerTeam() const;
-  int targetTotalRaces() const;
   void updateDetectedFormat();
   void startAggregation();
   void stopAggregation(bool autoFinished = false, bool syncOverlay = true);
@@ -128,10 +126,9 @@ private:
   QJsonObject buildLoungePayload(bool postToDiscord, bool resetMatch = false) const;
 
   QString configDirectory_, savedSource_;
-  QComboBox *source_{}, *raceSelector_{}, *reviewCourse_{};
-  QSpinBox *totalRaces_{};
+  QComboBox *source_{}, *raceSelector_{};
+  QLineEdit *tags_{}, *reviewCourse_{};
   QLabel *detectedFormat_{};
-  QLineEdit *tags_{};
   std::unique_ptr<JevApiReader> api_;
   bool requestIssued_ = false;
   uint64_t requestCycle_ = 0;

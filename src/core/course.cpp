@@ -1,9 +1,11 @@
 #include "course.hpp"
+#include "course-aliases.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -197,6 +199,29 @@ std::u32string toNormalizedCodepoints(const std::string &text) {
   return out;
 }
 
+std::string normalizeCourseAliasKey(const std::string &text) {
+  const QString norm = QString::fromStdString(text).normalized(QString::NormalizationForm_KC);
+  const auto rawU32 = norm.toUcs4();
+  std::u32string u32;
+  u32.reserve(rawU32.size());
+  for (uint32_t cp : rawU32) {
+    if (cp == U' ' || cp == U'\t' || cp == U'\r' || cp == U'\n' || cp == 0x3000)
+      continue;
+    if (cp >= U'a' && cp <= U'z')
+      cp -= 32;
+    else if (cp >= 0x3041 && cp <= 0x3096)
+      cp += 0x60;
+    constexpr std::u32string_view kSmallKana = U"ァィゥェォッャュョヮヵヶ";
+    constexpr std::u32string_view kLargeKana = U"アイウエオツヤユヨワカケ";
+    const auto pos = kSmallKana.find(static_cast<char32_t>(cp));
+    if (pos != std::u32string_view::npos)
+      cp = kLargeKana[pos];
+    u32.push_back(static_cast<char32_t>(cp));
+  }
+  return QString::fromUcs4(reinterpret_cast<const char32_t *>(u32.data()), int(u32.size()))
+      .toStdString();
+}
+
 struct CourseTitle {
   std::u32string prefix;
   std::u32string body;
@@ -355,6 +380,53 @@ std::optional<std::string> CourseRecognizer::matchCourseName(const std::string &
   }
   if (bestScore >= 7800 && bestScore - secondScore >= 800 && bestCourse)
     return std::string(bestCourse);
+  return std::nullopt;
+}
+
+std::optional<std::string> CourseRecognizer::resolveCourseInput(const std::string &rawInput) {
+  const std::string key = normalizeCourseAliasKey(rawInput);
+  if (key.empty())
+    return std::nullopt;
+
+  static const std::unordered_map<std::string, std::string> kAliasMap = [] {
+    std::unordered_map<std::string, std::string> map;
+    map.reserve(std::size(detail::kCourseAliases) * 2);
+    for (const auto &entry : detail::kCourseAliases)
+      map.emplace(entry.key, entry.canonical);
+    return map;
+  }();
+  if (const auto it = kAliasMap.find(key); it != kAliasMap.end())
+    return it->second;
+
+  if (auto fuzzy = matchCourseName(rawInput))
+    return fuzzy;
+
+  // Allow unique normalized partial match (e.g. スイーツ -> スイーツキャニオン) for >=3 codepoints.
+  const QString qKey = QString::fromStdString(key);
+  if (qKey.size() >= 3 && key != "3DS" && key != "N64" && key != "GBA" && key != "SFC" &&
+      key != "WII" && key != "TOUR") {
+    static const std::vector<std::pair<QString, std::string>> kCanonicalNorms = [] {
+      std::vector<std::pair<QString, std::string>> out;
+      out.reserve(std::size(kCourseDefinitions));
+      for (const auto &entry : kCourseDefinitions) {
+        out.emplace_back(QString::fromStdString(normalizeCourseAliasKey(entry.canonical)),
+                         entry.canonical);
+      }
+      return out;
+    }();
+    const std::string *uniqueMatch = nullptr;
+    for (const auto &item : kCanonicalNorms) {
+      if (item.first.contains(qKey)) {
+        if (uniqueMatch != nullptr) {
+          uniqueMatch = nullptr;
+          break;
+        }
+        uniqueMatch = &item.second;
+      }
+    }
+    if (uniqueMatch != nullptr)
+      return *uniqueMatch;
+  }
   return std::nullopt;
 }
 

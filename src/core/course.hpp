@@ -19,6 +19,7 @@ public:
 
   static bool isCourseScreen(const QImage &source);
   static std::optional<std::string> matchCourseName(const std::string &rawOcrText);
+  static std::optional<std::string> resolveCourseInput(const std::string &rawInput);
   std::optional<std::string> recognize(const QImage &source);
 
 private:

@@ -392,6 +392,27 @@ void tests() {
     require(quickscore::CourseRecognizer::matchCourseName("Tour ベルリンシュトラーセ") ==
                 std::optional<std::string>("ベルリンシュトラーセ"),
             "course match handles Tour city prefix with normalized codepoints");
+    require(quickscore::CourseRecognizer::resolveCourseInput("どるみ") ==
+                std::optional<std::string>("ドルフィンみさき"),
+            "resolveCourseInput resolves hiragana player nickname");
+    require(quickscore::CourseRecognizer::resolveCourseInput("ドルみ") ==
+                std::optional<std::string>("ドルフィンみさき"),
+            "resolveCourseInput resolves mixed-kana nickname");
+    require(quickscore::CourseRecognizer::resolveCourseInput("ﾄﾞﾙﾐ") ==
+                std::optional<std::string>("ドルフィンみさき"),
+            "resolveCourseInput resolves halfwidth katakana nickname");
+    require(quickscore::CourseRecognizer::resolveCourseInput("ももかん") ==
+                std::optional<std::string>("モーモーカントリー"),
+            "resolveCourseInput resolves Moo Moo Meadows nickname");
+    require(quickscore::CourseRecognizer::resolveCourseInput("7虹") ==
+                std::optional<std::string>("3DSレインボーロード"),
+            "resolveCourseInput resolves 7虹 to 3DS Rainbow Road");
+    require(quickscore::CourseRecognizer::resolveCourseInput("びぐぶ") ==
+                std::optional<std::string>("ビッグブルー"),
+            "resolveCourseInput resolves Big Blue shorthand");
+    require(quickscore::CourseRecognizer::resolveCourseInput("SS") ==
+                std::optional<std::string>("シドニーサンシャイン"),
+            "resolveCourseInput resolves English lounge abbreviation");
 
     QImage courseImg(1920, 1080, QImage::Format_ARGB32);
     courseImg.fill(Qt::black);

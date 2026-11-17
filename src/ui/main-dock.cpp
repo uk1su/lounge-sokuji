@@ -23,7 +23,6 @@
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
-#include <QSpinBox>
 #include <QTextStream>
 #include <QTimer>
 #include <QToolTip>
@@ -403,23 +402,12 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   srcLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   auto *tagLbl = new QLabel(tr("タグ"));
   tagLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-  auto *racesLbl = new QLabel(tr("レース数"));
-  racesLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-  totalRaces_ = new QSpinBox;
-  totalRaces_->setObjectName("totalRaces");
-  totalRaces_->setRange(1, 48);
-  totalRaces_->setValue(12);
-  totalRaces_->setSuffix(tr("R"));
-  totalRaces_->setToolTip(tr("Lounge即時の総レース数（通常12R）"));
-  totalRaces_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   form->addWidget(srcLbl, 0, 0);
   form->addWidget(source_, 0, 1);
   form->addWidget(refresh_, 0, 2);
   form->addWidget(tagLbl, 1, 0);
   form->addWidget(tags_, 1, 1);
   form->addWidget(detectedFormat_, 1, 2);
-  form->addWidget(racesLbl, 2, 0);
-  form->addWidget(totalRaces_, 2, 1);
   form->setColumnStretch(1, 1);
   layout->addWidget(setup);
 
@@ -472,20 +460,12 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   reviewHelp_->hide();
   layout->addWidget(reviewHelp_);
 
-  reviewCourse_ = new QComboBox;
+  reviewCourse_ = new QLineEdit;
   reviewCourse_->setObjectName("reviewCourse");
-  reviewCourse_->setEditable(true);
-  reviewCourse_->setInsertPolicy(QComboBox::NoInsert);
-  reviewCourse_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-  reviewCourse_->setMinimumContentsLength(6);
+  reviewCourse_->setClearButtonEnabled(true);
+  reviewCourse_->setPlaceholderText(tr("コース名（例: どるみ、マリカス）"));
+  reviewCourse_->setToolTip(tr("略称・プレイヤー呼称（どるみ等）を入力すると正式名称へ自動補正します"));
   reviewCourse_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-  reviewCourse_->addItem(tr("未設定"), QString{});
-  for (const auto &name : canonicalCourseNames()) {
-    const QString qname = QString::fromStdString(name);
-    reviewCourse_->addItem(qname, qname);
-  }
-  if (auto *le = reviewCourse_->lineEdit())
-    le->setPlaceholderText(tr("コース名（任意・略称可）"));
   auto *courseEditLbl = new QLabel(tr("コース"));
   courseEditLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   reviewCourseRow_ = buttons({courseEditLbl, reviewCourse_});
@@ -536,19 +516,19 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
 
   connect(refresh_, &QPushButton::clicked, this, [this] { refreshSources(); });
   connect(tags_, &QLineEdit::textChanged, this, [this] { updateDetectedFormat(); });
-  connect(totalRaces_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this] {
-    saveSettings();
-    updateScores();
-    if (running_ || !session_.races().empty() || session_.hasPendingFirstRace()) {
-      const bool autoFinished = checkAutoFinish(false);
-      if (postDiscord_->isChecked())
-        syncDiscord(!session_.races().empty() || autoFinished);
-    }
-  });
-  connect(reviewCourse_, &QComboBox::currentTextChanged, this, [this] {
+  connect(reviewCourse_, &QLineEdit::textEdited, this, [this] {
     if (reviewing_) {
       userTouchedReview_ = true;
       reviewOpenedMs_ = clock_.elapsed();
+    }
+  });
+  connect(reviewCourse_, &QLineEdit::editingFinished, this, [this] {
+    if (!reviewCourse_)
+      return;
+    const QString resolved = editedReviewCourse();
+    if (resolved != reviewCourse_->text().trimmed()) {
+      const QSignalBlocker blocker(reviewCourse_);
+      reviewCourse_->setText(resolved);
     }
   });
   connect(start_, &QPushButton::clicked, this, [this] { startAggregation(); });
@@ -750,10 +730,6 @@ int MainDock::configuredPlayersPerTeam() const {
   return playersForTeamCount(configuredTags().size());
 }
 
-int MainDock::targetTotalRaces() const {
-  return totalRaces_ ? std::clamp(totalRaces_->value(), 1, 48) : 12;
-}
-
 void MainDock::updateDetectedFormat() {
   if (!detectedFormat_)
     return;
@@ -805,14 +781,13 @@ void MainDock::stopAggregation(bool autoFinished, bool syncOverlay) {
 }
 
 bool MainDock::checkAutoFinish(bool syncOverlay) {
-  const int totalRaces = targetTotalRaces();
-  if (!running_ || int(session_.effectiveRaceCount()) < totalRaces)
+  if (!running_ || session_.effectiveRaceCount() < 12)
     return false;
   loungeOverlayActive_ = true;
   if (!loungeOverlayUntilUtc_.isValid())
     loungeOverlayUntilUtc_ = QDateTime::currentDateTimeUtc().addSecs(60);
   stopAggregation(true, syncOverlay);
-  setStatus(tr("%1レース終了したため自動停止しました。").arg(totalRaces));
+  setStatus(tr("12レース終了したため自動停止しました。"));
   return true;
 }
 
@@ -1409,15 +1384,7 @@ void MainDock::review(const Analysis &analysis, EditMode mode, int raceIndex) {
         initialCourse = !pending_.detectedCourse.isEmpty() ? pending_.detectedCourse : currentCourse_;
       }
       const QSignalBlocker blocker(reviewCourse_);
-      if (initialCourse.isEmpty()) {
-        reviewCourse_->setCurrentIndex(0);
-      } else {
-        const int idx = reviewCourse_->findData(initialCourse);
-        if (idx >= 0)
-          reviewCourse_->setCurrentIndex(idx);
-        else
-          reviewCourse_->setCurrentText(initialCourse);
-      }
+      reviewCourse_->setText(initialCourse);
     }
   }
   reviewHelp_->hide();
@@ -1849,7 +1816,7 @@ bool MainDock::commit(const std::vector<Standing> &standings, bool corrected, co
   updateScores();
   refreshRaceHistory();
   updatePreview(raw.image, standings);
-  if (running_ && int(session_.effectiveRaceCount()) >= targetTotalRaces()) {
+  if (running_ && session_.effectiveRaceCount() >= 12) {
     loungeOverlayActive_ = true;
     loungeOverlayUntilUtc_ = QDateTime::currentDateTimeUtc().addSecs(60);
   }
@@ -1913,11 +1880,11 @@ void MainDock::clearCurrentCourse() {
 QString MainDock::editedReviewCourse() const {
   if (!reviewCourse_)
     return {};
-  const QString raw = reviewCourse_->currentText().trimmed();
+  const QString raw = reviewCourse_->text().trimmed();
   if (raw.isEmpty() || raw == tr("未設定"))
     return {};
-  if (const auto matched = CourseRecognizer::matchCourseName(raw.toStdString()))
-    return QString::fromStdString(*matched);
+  if (const auto resolved = CourseRecognizer::resolveCourseInput(raw.toStdString()))
+    return QString::fromStdString(*resolved);
   return raw;
 }
 
@@ -1931,9 +1898,7 @@ void MainDock::updateCourseDisplay() {
 void MainDock::updateScores() {
   const auto totals = session_.totals();
   const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
-  const int totalRaces = targetTotalRaces();
-  const QString scoreLine =
-      formatScoreLine(activeTags, totals, session_.effectiveRaceCount(), totalRaces);
+  const QString scoreLine = formatScoreLine(activeTags, totals, session_.effectiveRaceCount(), 12);
   scores_->setText(scoreLine);
 
   {
@@ -1950,7 +1915,7 @@ void MainDock::updateScores() {
   }
 
   const OverlayState overlay = buildOverlayState(
-      activeTags, totals, session_.effectiveRaceCount(), totalRaces, ++overlayRevision_);
+      activeTags, totals, session_.effectiveRaceCount(), 12, ++overlayRevision_);
   const QImage image = renderOverlayImage(overlay);
   std::vector<uint8_t> pixels(image.constBits(),
                               image.constBits() + size_t(image.bytesPerLine() * image.height()));
@@ -2025,7 +1990,7 @@ QJsonObject MainDock::buildLoungePayload(bool postToDiscord, bool resetMatch) co
                   {"races", racesJson},
                   {"current_course", currentCourse_},
                   {"race_count", int(session_.effectiveRaceCount())},
-                  {"total_races", targetTotalRaces()},
+                  {"total_races", 12},
                   {"score_line", scores_->text()},
                   {"pending_first_race", session_.hasPendingFirstRace()},
                   {"pending_first_course",
@@ -2093,17 +2058,11 @@ void MainDock::saveSettings() {
   s.setValue("sourceKey", source_->currentData());
   s.setValue("tags", tags_->text());
   s.setValue("postToDiscordChannel", postDiscord_->isChecked());
-  if (totalRaces_)
-    s.setValue("totalRaces", totalRaces_->value());
 }
 
 void MainDock::loadSettings() {
   QSettings s(configDirectory_ + "/settings.ini", QSettings::IniFormat);
   tags_->setText(s.value("tags", "A, B, C, D").toString());
-  if (totalRaces_) {
-    const QSignalBlocker blocker(totalRaces_);
-    totalRaces_->setValue(std::clamp(s.value("totalRaces", 12).toInt(), 1, 48));
-  }
   updateDetectedFormat();
   savedSource_ = s.value("schema", 0).toInt() >= 5 ? s.value("sourceKey").toString() : QString{};
   postDiscord_->setChecked(s.value("postToDiscordChannel", false).toBool());

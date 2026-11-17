@@ -19,7 +19,6 @@
 #include <QPalette>
 #include <QPushButton>
 #include <QSettings>
-#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QThread>
 #include <iostream>
@@ -381,9 +380,10 @@ int main(int argc, char **argv) {
     editRace->click();
     require(preview->isEditing() && preview->hasPreview() && preview->hasTagStrip(),
             "editRace opens clickable right-side tag editor for 1R");
-    auto *reviewCourse = dock->findChild<QComboBox *>("reviewCourse");
-    require(reviewCourse && reviewCourse->isVisible(), "reviewCourse editor visible");
-    reviewCourse->setCurrentText(QStringLiteral("ミュートシティ"));
+    auto *reviewCourse = dock->findChild<QLineEdit *>("reviewCourse");
+    require(reviewCourse && reviewCourse->isVisible(), "reviewCourse line edit visible");
+    require(!dock->findChild<QWidget *>("totalRaces"), "totalRaces remains fixed at 12R");
+    reviewCourse->setText(QStringLiteral("どるみ"));
     require(dock->grab().save(args[6] + ".edit.png"), "edit UI preview with right-side tags");
     preview->setRowTag(0, QStringLiteral("う"));
     preview->setRowTag(1, QStringLiteral("M"));
@@ -392,25 +392,13 @@ int main(int argc, char **argv) {
         "う 71 (-6)／【M】65／L 64 (+1)／A 56 (+9)／B 36 (+29)／R 36 (+29)／現在2位／＠8");
     require(scores->text() == editedLine && !preview->isEditing(),
             "editing 1R updates total scores immediately");
-    require(raceHistory->itemText(0).contains(QStringLiteral("ミュートシティ")) &&
+    require(raceHistory->itemText(0).contains(QStringLiteral("ドルフィンみさき")) &&
                 raceHistory->itemText(0).contains(QStringLiteral("補正済み")),
-            "race history shows edited course name and corrected badge");
+            "race history shows resolved canonical course name and corrected badge");
     elapsed.restart();
     while (discordApi.count < 8 && elapsed.elapsed() < 5000)
       pump(blank, 50);
     require(discordApi.count == 8, "editing 1R syncs corrected totals and course to Discord");
-    auto *totalRacesSpin = dock->findChild<QSpinBox *>("totalRaces");
-    require(totalRacesSpin && totalRacesSpin->value() == 12, "default totalRaces is 12");
-    totalRacesSpin->setValue(8);
-    require(scores->text().endsWith(QStringLiteral("／＠4")),
-            "lowering totalRaces updates remaining race count immediately");
-    elapsed.restart();
-    while (discordApi.count < 9 && elapsed.elapsed() < 5000)
-      pump(blank, 50);
-    totalRacesSpin->setValue(12);
-    elapsed.restart();
-    while (discordApi.count < 10 && elapsed.elapsed() < 5000)
-      pump(blank, 50);
     require(dock->overlayPort() > 0, "overlay HTTP server bound to localhost port");
     require(QFile::exists(config.path() + "/overlay.html") &&
                 QFile::exists(config.path() + "/overlay-state.json") &&
