@@ -17,6 +17,7 @@ public:
   CourseRecognizer();
   ~CourseRecognizer();
 
+  static bool isJapaneseOcrAvailable();
   static bool isCourseScreen(const QImage &source);
   static std::optional<std::string> matchCourseName(const std::string &rawOcrText);
   static std::optional<std::string> resolveCourseInput(const std::string &rawInput);

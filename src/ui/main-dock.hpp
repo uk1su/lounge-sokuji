@@ -157,6 +157,7 @@ private:
   std::vector<Standing> lastCommittedStandings_;
   QElapsedTimer clock_;
   bool running_ = false, reviewing_ = false, storageOk_ = true;
+  bool japaneseOcrAvailable_ = true;
   bool loungeOverlayActive_ = false;
   QDateTime loungeOverlayUntilUtc_;
   EditMode editMode_ = EditMode::None;

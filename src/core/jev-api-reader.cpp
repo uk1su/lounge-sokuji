@@ -5,6 +5,7 @@
 #include <QHttpMultiPart>
 #include <QJsonDocument>
 #include <QPainter>
+#include <QSslSocket>
 #include <QTextBoundaryFinder>
 #include <QTimer>
 #include <QUuid>
@@ -230,12 +231,36 @@ void JevApiReader::read(Analysis frame, std::vector<std::string> tags, Completio
               reply->deleteLater();
               done(std::move(result));
             } else {
+              const auto netErr = reply->error();
+              const QString errStr = reply->errorString();
+              QString msg;
+              if (status == 0) {
+                if (!QSslSocket::supportsSsl() ||
+                    netErr == QNetworkReply::SslHandshakeFailedError ||
+                    errStr.contains("TLS", Qt::CaseInsensitive) ||
+                    errStr.contains("SSL", Qt::CaseInsensitive)) {
+                  msg = QStringLiteral(
+                      "HTTPS(TLS)を初期化できません。OBS本体のバージョンとプラグイン同梱TLS"
+                      "(qschannelbackend.dll)が一致していない可能性があります。");
+                } else if (netErr == QNetworkReply::OperationCanceledError ||
+                           netErr == QNetworkReply::TimeoutError) {
+                  msg = QStringLiteral(
+                      "Jev APIへの通信がタイムアウトしました。ネット接続を確認して「再判定」または"
+                      "手動入力してください。");
+                } else {
+                  msg = QStringLiteral(
+                            "Jev APIに接続できませんでした（%1）。ネット接続を確認して「再判定」"
+                            "または手動入力してください。")
+                            .arg(errStr);
+                }
+              } else {
+                msg = QStringLiteral(
+                          "Jev APIに接続できませんでした (HTTP "
+                          "%1)。キー・利用制限・接続を確認してください。自動再送はしません。")
+                          .arg(status);
+              }
               reply->deleteLater();
-              done(failed(std::move(frame),
-                          QStringLiteral(
-                              "Jev APIに接続できませんでした (HTTP "
-                              "%1)。キー・利用制限・接続を確認してください。自動再送はしません。")
-                              .arg(status)));
+              done(failed(std::move(frame), msg));
             }
           });
 }

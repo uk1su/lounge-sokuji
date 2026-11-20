@@ -4,6 +4,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QSslSocket>
 #include <QTimer>
 #include <QUuid>
 #include <memory>
@@ -113,7 +114,25 @@ void DiscordSender::send(QString token, QString channel, QString content, Comple
         else if (code == 429)
           message = QStringLiteral(
               "Discordの送信制限に達しました。時間を置いて送信してください。自動再送はしません。");
-        else
+        else if (code == 0) {
+          const auto netErr = reply->error();
+          const QString errStr = reply->errorString();
+          if (!QSslSocket::supportsSsl() || netErr == QNetworkReply::SslHandshakeFailedError ||
+              errStr.contains("TLS", Qt::CaseInsensitive) ||
+              errStr.contains("SSL", Qt::CaseInsensitive)) {
+            message = QStringLiteral(
+                "HTTPS(TLS)を初期化できません。OBS本体のバージョンとプラグイン同梱TLS"
+                "(qschannelbackend.dll)が一致していない可能性があります。");
+          } else if (netErr == QNetworkReply::OperationCanceledError ||
+                     netErr == QNetworkReply::TimeoutError) {
+            message = QStringLiteral(
+                "Discordへの通信がタイムアウトしました。ネット接続を確認してください。");
+          } else {
+            message = QStringLiteral(
+                          "Discordに接続できませんでした（%1）。ネット接続を確認してください。")
+                          .arg(errStr);
+          }
+        } else
           message = QStringLiteral("送信結果を確認できませんでした (HTTP "
                                    "%1)。Discordに届いているか確認してから再送してください。")
                         .arg(code);

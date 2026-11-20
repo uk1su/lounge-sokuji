@@ -22,6 +22,25 @@ bool savePng(const QString &path, const QImage &image, QString &error) {
 
 QRect resultTableRect() { return QRect(820, 70, 1040, 945); }
 
+void pruneResultCaptures(const QString &directory, int maxKeep) {
+  if (directory.isEmpty() || maxKeep <= 0)
+    return;
+  QDir dir(directory);
+  if (!dir.exists())
+    return;
+  const QStringList jsonFiles = dir.entryList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+  if (jsonFiles.size() <= maxKeep)
+    return;
+  const int removeCount = jsonFiles.size() - maxKeep;
+  for (int i = 0; i < removeCount; ++i) {
+    const QString jsonName = jsonFiles[i];
+    const QString stem = jsonName.left(jsonName.size() - 5);
+    dir.remove(jsonName);
+    dir.remove(stem + QStringLiteral(".png"));
+    dir.remove(stem + QStringLiteral("-result.png"));
+  }
+}
+
 ResultCapture saveResultCapture(const QString &directory, const QImage &frame,
                                 QJsonObject context) {
   ResultCapture result;
@@ -65,6 +84,8 @@ ResultCapture saveResultCapture(const QString &directory, const QImage &frame,
       result.files.remove("metadata");
       result.error = QStringLiteral("リザルト画像の情報を保存できません: %1 (%2)")
                          .arg(base + ".json", metadata.errorString());
+    } else {
+      pruneResultCaptures(directory, 60);
     }
   };
   save();

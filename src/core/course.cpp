@@ -325,6 +325,19 @@ struct CourseRecognizer::Impl {
 CourseRecognizer::CourseRecognizer() : impl_(std::make_unique<Impl>()) {}
 CourseRecognizer::~CourseRecognizer() = default;
 
+bool CourseRecognizer::isJapaneseOcrAvailable() {
+#ifdef _WIN32
+  try {
+    winrt::Windows::Globalization::Language lang(L"ja");
+    return winrt::Windows::Media::Ocr::OcrEngine::IsLanguageSupported(lang);
+  } catch (...) {
+    return false;
+  }
+#else
+  return true;
+#endif
+}
+
 bool CourseRecognizer::isCourseScreen(const QImage &source) {
   if (source.isNull() || source.width() <= 0 || source.height() <= 0)
     return false;

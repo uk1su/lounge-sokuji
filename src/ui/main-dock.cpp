@@ -20,9 +20,11 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QSslSocket>
 #include <QTextStream>
 #include <QTimer>
 #include <QToolTip>
@@ -449,6 +451,20 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   courseLabel_->setStyleSheet(
       "font-size:11.5px;font-weight:700;color:#80cbc4;background:#10141a;border:1px solid "
       "#2b3842;border-radius:4px;padding:3px 7px;");
+  japaneseOcrAvailable_ = CourseRecognizer::isJapaneseOcrAvailable();
+  if (!japaneseOcrAvailable_) {
+    blog(LOG_WARNING,
+         "[MK8DX QuickScore] Windows Japanese OCR language pack is not installed; course "
+         "auto-recognition is unavailable.");
+    courseLabel_->setToolTip(
+        tr("Windowsの日本語言語パック(OCR)が未導入のため、コース自動認識が利用できません。"
+           "Windowsの設定→時刻と言語→言語から日本語を追加してください。"));
+  }
+  if (!QSslSocket::supportsSsl()) {
+    blog(LOG_WARNING,
+         "[MK8DX QuickScore] Qt TLS backend is unavailable; HTTPS API/Discord requests may fail "
+         "(check OBS Qt version compatibility with qschannelbackend.dll).");
+  }
   updateCourseDisplay();
   layout->addWidget(courseLabel_);
 
@@ -730,8 +746,9 @@ void MainDock::refreshSources() {
 }
 
 std::vector<std::string> MainDock::configuredTags() const {
+  static const QRegularExpression kTagSep(QStringLiteral("[,，、\\s]+"));
   std::vector<std::string> out;
-  for (const auto &p : tags_->text().split(',')) {
+  for (const auto &p : tags_->text().split(kTagSep, Qt::SkipEmptyParts)) {
     auto v = p.trimmed().toStdString();
     if (!v.empty() && std::find(out.begin(), out.end(), v) == out.end())
       out.push_back(v);
@@ -1928,8 +1945,13 @@ QString MainDock::editedReviewCourse() const {
 void MainDock::updateCourseDisplay() {
   if (!courseLabel_)
     return;
-  courseLabel_->setText(
-      tr("現在コース：%1").arg(currentCourse_.isEmpty() ? tr("—") : currentCourse_));
+  if (!currentCourse_.isEmpty()) {
+    courseLabel_->setText(tr("現在コース：%1").arg(currentCourse_));
+  } else if (!japaneseOcrAvailable_) {
+    courseLabel_->setText(tr("現在コース：—（日本語OCR未導入）"));
+  } else {
+    courseLabel_->setText(tr("現在コース：—"));
+  }
 }
 
 void MainDock::updateScores() {
