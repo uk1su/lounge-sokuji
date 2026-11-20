@@ -30,6 +30,9 @@
 #include <algorithm>
 #include <cmath>
 #include <obs-module.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 namespace quickscore {
 namespace {
 int playersForTeamCount(size_t teamCount) {
@@ -148,7 +151,12 @@ void ResultPreviewWidget::setPreview(const QImage &frame, const std::vector<Stan
                                      const StandingsScoreRead &cumulative) {
   const bool wasEmpty = cropped_.isNull();
   const bool badgeChanged = (standings_.size() == 12) != (standings.size() == 12);
-  cropped_ = cropResultArea(frame);
+  QImage cropped = cropResultArea(frame);
+  // During live monitoring (no standings overlay), downscale preview once to keep UI paint cheap.
+  if (standings.empty() && !cropped.isNull() && cropped.width() > 360) {
+    cropped = cropped.scaledToWidth(360, Qt::FastTransformation);
+  }
+  cropped_ = std::move(cropped);
   standings_ = standings;
   teamTags_ = teamTags;
   evidence_ = evidence;
@@ -637,17 +645,22 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
          unsigned(overlayServer_->port()));
   }
 
-  capture_ = std::make_unique<FrameCapture>([this](Frame frame) {
-    if (frameQueued_.exchange(true))
-      return;
-    QMetaObject::invokeMethod(
-        this,
-        [this, frame = std::move(frame)]() mutable {
-          frameQueued_ = false;
-          receiveFrame(std::move(frame));
-        },
-        Qt::QueuedConnection);
-  });
+  capture_ = std::make_unique<FrameCapture>(
+      [this](Frame frame) {
+        if (frameQueued_.exchange(true))
+          return;
+        QMetaObject::invokeMethod(
+            this,
+            [this, frame = std::move(frame)]() mutable {
+              frameQueued_ = false;
+              receiveFrame(std::move(frame));
+            },
+            Qt::QueuedConnection);
+      },
+      [this]() {
+        return !frameQueued_.load(std::memory_order_relaxed) &&
+               !workerBusy_.load(std::memory_order_relaxed);
+      });
   worker_ = std::thread([this] { workerLoop(); });
   auto *timer = new QTimer(this);
   timer->setInterval(1000);
@@ -857,6 +870,8 @@ void MainDock::startAggregation() {
   loungeOverlayActive_ = true;
   loungeOverlayUntilUtc_ = {};
   lastFrameMs_ = lastAnalysisMs_ = clock_.elapsed();
+  lastPreviewMs_ = 0;
+  capture_->setIntervalSeconds(0.250f);
   capture_->start();
   for (auto *w : std::initializer_list<QWidget *>{source_, tags_, refresh_})
     w->setEnabled(false);
@@ -876,14 +891,28 @@ void MainDock::updatePreview(const QImage &frame, const std::vector<Standing> &s
 void MainDock::receiveFrame(Frame frame) {
   if (!running_)
     return;
-  lastFrameMs_ = clock_.elapsed();
-  QImage view(frame.rgba.data(), frame.width, frame.height, frame.stride, QImage::Format_RGBA8888);
-  latestImage_ = view.copy();
+  const qint64 now = clock_.elapsed();
+  lastFrameMs_ = now;
+  struct PooledFrame {
+    std::vector<uint8_t> rgba;
+    std::shared_ptr<FrameBufferPool> pool;
+    ~PooledFrame() {
+      if (pool)
+        pool->release(std::move(rgba));
+    }
+  };
+  auto *pooled = new PooledFrame{std::move(frame.rgba), capture_ ? capture_->bufferPool() : nullptr};
+  latestImage_ = QImage(
+      pooled->rgba.data(), frame.width, frame.height, frame.stride, QImage::Format_RGBA8888,
+      [](void *p) { delete static_cast<PooledFrame *>(p); }, pooled);
   const bool holdCommittedPreview =
       gate_.locked() && !lastCommittedFrame_.isNull() && lastCommittedStandings_.size() == 12 &&
       (latest_.complete() || latest_.layout.visible || latest_.isCumulativeStandings());
-  if (!reviewing_ && !holdCommittedPreview)
+  if (!reviewing_ && !holdCommittedPreview && preview_->isVisible() &&
+      (lastPreviewMs_ == 0 || (now - lastPreviewMs_) >= 1000)) {
+    lastPreviewMs_ = now;
     updatePreview(latestImage_);
+  }
   if (busy_ || !analyzer_)
     return;
   {
@@ -894,11 +923,15 @@ void MainDock::receiveFrame(Frame frame) {
     jobGeneration_ = generation_;
     jobReady_ = true;
     busy_ = true;
+    workerBusy_.store(true, std::memory_order_release);
   }
   workerCv_.notify_one();
 }
 
 void MainDock::workerLoop() {
+#ifdef _WIN32
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
   CourseRecognizer courseRec;
   for (;;) {
     QImage image;
@@ -948,11 +981,15 @@ void MainDock::workerLoop() {
 void MainDock::receiveAnalysis(Analysis result, uint64_t generation, qint64 duration,
                                QDateTime frameReceivedAt) {
   busy_ = false;
+  workerBusy_.store(false, std::memory_order_release);
   if (!running_ || generation != generation_)
     return;
   lastAnalysisMs_ = clock_.elapsed();
   latest_ = std::move(result);
   latestFrameReceivedAt_ = frameReceivedAt;
+  const bool highFreqNeeded = !latest_.detectedCourse.isEmpty() || latest_.layout.anchors >= 3 ||
+                              latest_.layout.visible || standingsStableCount_ > 0;
+  capture_->setIntervalSeconds(highFreqNeeded ? 0.100f : 0.250f);
   if (!latest_.error.isEmpty()) {
     const auto error = latest_.error;
     stopAggregation();

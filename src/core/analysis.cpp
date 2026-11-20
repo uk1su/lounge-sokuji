@@ -592,56 +592,84 @@ Analysis Analyzer::read(const QImage &source, const std::vector<std::string> &ta
         "元ゲーム映像が16:9ではありません。クロップ前の映像ソースを選択してください。");
     return out;
   }
+  if (layoutOnly) {
+    QImage fastSource = source;
+    if (fastSource.width() != 1920 || fastSource.height() != 1080) {
+      fastSource = fastSource.scaled(1920, 1080, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    }
+    const auto fmt = fastSource.format();
+    const bool directRgba = (fmt == QImage::Format_RGBA8888 || fmt == QImage::Format_RGBA8888_Premultiplied ||
+                             fmt == QImage::Format_RGBX8888);
+    const bool directBgra = (fmt == QImage::Format_ARGB32 || fmt == QImage::Format_ARGB32_Premultiplied ||
+                             fmt == QImage::Format_RGB32);
+    if (!directRgba && !directBgra)
+      fastSource = fastSource.convertToFormat(QImage::Format_ARGB32);
+    const bool isRgba = (fastSource.format() == QImage::Format_RGBA8888 ||
+                         fastSource.format() == QImage::Format_RGBA8888_Premultiplied ||
+                         fastSource.format() == QImage::Format_RGBX8888);
+    const uint8_t *bits = fastSource.constBits();
+    const int stride = fastSource.bytesPerLine();
+
+    out.layout = reference_.readLayoutOnlyPixels(bits, stride, isRgba);
+    if (out.layout.anchors >= 8) {
+      // A finish banner can dim the bottom rank without hiding its digits. Normalize
+      // contrast per scanline, and require the visible 12 glyph to beat every other
+      // rank template. This detects a real glyph; it never assigns a missing name.
+      if (out.layout.anchors == 11 && out.layout.pluses >= 10 && out.layout.anchor[11] < .65 &&
+          std::all_of(out.layout.anchor.begin(), out.layout.anchor.begin() + 11,
+                      [](double score) { return score >= .65; })) {
+        double score = 0;
+        if (reference_.visibleLastRankPixels(bits, stride, isRgba, &score)) {
+          out.layout.anchor[11] = score;
+          ++out.layout.anchors;
+        }
+      }
+      if (out.layout.pluses <= 2 && out.layout.anchors >= 8 && out.layout.anchors < 12) {
+        // Sorted cumulative standings (2R+) repeat rank badges on ties (e.g. 1,1,3 or 9,9,11).
+        for (int row = 1; row < 12; ++row) {
+          if (out.layout.anchor[size_t(row)] >= .65)
+            continue;
+          double score = 0;
+          if (reference_.visibleTiedRankPixels(bits, stride, isRgba, row, &score)) {
+            out.layout.anchor[size_t(row)] = score;
+            ++out.layout.anchors;
+          }
+        }
+      }
+      const bool needImage =
+          (out.layout.anchors >= 11 && out.layout.pluses >= 9) ||
+          (out.layout.anchors == 12 && out.layout.pluses <= 2);
+      if (needImage) {
+        out.image = fastSource.format() == QImage::Format_ARGB32
+                        ? fastSource
+                        : fastSource.convertToFormat(QImage::Format_ARGB32);
+        if (out.layout.anchors >= 11 && out.layout.pluses >= 9)
+          out.finished_in_twelfth = hasTwelfthFinishNotice(out.image);
+        if (out.layout.anchors == 12 && out.layout.pluses <= 2)
+          out.cumulativeScores = readCumulativeScores(out.image);
+      }
+    }
+    // Layout-only recognition never invokes OCR or fills rows from team capacity.
+    out.standings.reserve(12);
+    out.evidence.resize(12);
+    for (int row = 0; row < 12; ++row) {
+      out.standings.push_back({row + 1, {}, 0});
+    }
+    return out;
+  }
   if (source.width() == 1920 && source.height() == 1080) {
     out.image = source.format() == QImage::Format_ARGB32
                     ? source
                     : source.convertToFormat(QImage::Format_ARGB32);
   } else {
     out.image = source
-                    .scaled(1920, 1080, Qt::IgnoreAspectRatio,
-                            layoutOnly ? Qt::FastTransformation : Qt::SmoothTransformation)
+                    .scaled(1920, 1080, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
                     .convertToFormat(QImage::Format_ARGB32);
   }
   mk::Image image(1920, 1080);
   std::copy(out.image.constBits(), out.image.constBits() + image.pixels.size(),
             image.pixels.begin());
-  out.layout = layoutOnly ? reference_.readLayoutOnly(image) : reference_.read(image);
-  if (layoutOnly) {
-    // A finish banner can dim the bottom rank without hiding its digits. Normalize
-    // contrast per scanline, and require the visible 12 glyph to beat every other
-    // rank template. This detects a real glyph; it never assigns a missing name.
-    if (out.layout.anchors == 11 && out.layout.pluses >= 10 && out.layout.anchor[11] < .65 &&
-        std::all_of(out.layout.anchor.begin(), out.layout.anchor.begin() + 11,
-                    [](double score) { return score >= .65; })) {
-      double score = 0;
-      if (reference_.visibleLastRank(image, &score)) {
-        out.layout.anchor[11] = score;
-        ++out.layout.anchors;
-      }
-    }
-    if (out.layout.anchors >= 11 && out.layout.pluses >= 9)
-      out.finished_in_twelfth = hasTwelfthFinishNotice(out.image);
-    if (out.layout.pluses <= 2 && out.layout.anchors >= 8 && out.layout.anchors < 12) {
-      // Sorted cumulative standings (2R+) repeat rank badges on ties (e.g. 1,1,3 or 9,9,11).
-      for (int row = 1; row < 12; ++row) {
-        if (out.layout.anchor[size_t(row)] >= .65)
-          continue;
-        double score = 0;
-        if (reference_.visibleTiedRank(image, row, &score)) {
-          out.layout.anchor[size_t(row)] = score;
-          ++out.layout.anchors;
-        }
-      }
-    }
-    if (out.layout.anchors == 12 && out.layout.pluses <= 2)
-      out.cumulativeScores = readCumulativeScores(out.image);
-    // Layout-only recognition never invokes OCR or fills rows from team capacity.
-    for (int row = 0; row < 12; ++row) {
-      out.standings.push_back({row + 1, {}, 0});
-      out.evidence.push_back({});
-    }
-    return out;
-  }
+  out.layout = reference_.read(image);
   out.finished_in_twelfth = hasTwelfthFinishNotice(out.image);
   if (!out.complete())
     return out;

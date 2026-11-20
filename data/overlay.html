@@ -297,10 +297,10 @@
         }
         if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
           pollHttp();
-          pollTimer = window.setInterval(pollHttp, 250);
+          pollTimer = window.setInterval(pollHttp, 600);
         } else {
           pollFileScript();
-          pollTimer = window.setInterval(pollFileScript, 300);
+          pollTimer = window.setInterval(pollFileScript, 750);
         }
       });
     })();

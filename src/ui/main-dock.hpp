@@ -173,8 +173,9 @@ private:
   int standingsCheckedTotal_ = -1;
   int verifiedRaceCount_ = 0;
   uint64_t generation_ = 0;
-  qint64 lastFrameMs_ = 0, lastAnalysisMs_ = 0;
+  qint64 lastFrameMs_ = 0, lastAnalysisMs_ = 0, lastPreviewMs_ = 0;
   std::atomic_bool frameQueued_{false};
+  std::atomic_bool workerBusy_{false};
   std::mutex workerMutex_;
   std::condition_variable workerCv_;
   std::thread worker_;
