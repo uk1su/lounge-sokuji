@@ -139,6 +139,45 @@ void Session::configure(std::vector<std::string> tags, int playersPerTeam)
   playersPerTeam_ = playersPerTeam;
 }
 
+bool Session::renameTags(const std::vector<std::string> &newTags)
+{
+  if (tags_.empty() || newTags.size() != tags_.size())
+    return false;
+  std::set<std::string> uniqueCheck;
+  for (const auto &t : newTags) {
+    if (t.empty() || !uniqueCheck.insert(t).second)
+      return false;
+  }
+  std::map<std::string, std::string> remap;
+  for (size_t i = 0; i < tags_.size(); ++i)
+    remap[tags_[i]] = newTags[i];
+
+  const auto mapTag = [&](std::string &tag) {
+    auto it = remap.find(tag);
+    if (it != remap.end())
+      tag = it->second;
+  };
+  const auto mapScores = [&](const std::map<std::string, int> &in) {
+    std::map<std::string, int> out;
+    for (const auto &[k, v] : in) {
+      auto it = remap.find(k);
+      out[it != remap.end() ? it->second : k] += v;
+    }
+    return out;
+  };
+
+  for (auto &race : races_) {
+    for (auto &s : race.standings)
+      mapTag(s.tag);
+    race.points = mapScores(race.points);
+  }
+  for (auto &s : pendingFirstRaceStandings_)
+    mapTag(s.tag);
+  teamAdjustments_ = mapScores(teamAdjustments_);
+  tags_ = newTags;
+  return true;
+}
+
 bool Session::hasAutoConfirmedRace() const
 {
   return std::any_of(races_.begin(), races_.end(), [](const RaceResult &race) {

@@ -39,6 +39,7 @@ ValidationResult validateRace(const std::vector<Standing> &standings,
 class Session {
 public:
   void configure(std::vector<std::string> tags, int playersPerTeam);
+  bool renameTags(const std::vector<std::string> &newTags);
   ValidationResult validate(const std::vector<Standing> &standings) const;
   bool commit(std::vector<Standing> standings, bool corrected, ValidationResult *failure = nullptr,
               std::string course = {});

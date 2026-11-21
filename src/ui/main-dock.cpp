@@ -582,6 +582,43 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
 
   connect(refresh_, &QPushButton::clicked, this, [this] { refreshSources(); });
   connect(tags_, &QLineEdit::textChanged, this, [this] { updateDetectedFormat(); });
+  connect(tags_, &QLineEdit::editingFinished, this, [this] {
+    if (session_.tags().empty()) {
+      saveSettings();
+      return;
+    }
+    const auto newTags = configuredTags();
+    if (newTags == session_.tags())
+      return;
+    if (newTags.size() == session_.tags().size() && session_.renameTags(newTags)) {
+      for (auto &s : latest_.standings) {
+        if (!s.tag.empty() &&
+            std::find(newTags.begin(), newTags.end(), s.tag) == newTags.end()) {
+          s.tag.clear();
+        }
+      }
+      saveSettings();
+      updateScores();
+      if (running_ || !session_.races().empty())
+        syncDiscord(!session_.races().empty());
+      setStatus(tr("タグを変更しました（既存の点数を引き継ぎました）"));
+    } else if (session_.races().empty() && !session_.hasPendingFirstRace() &&
+               playersForTeamCount(newTags.size()) > 0) {
+      session_.configure(newTags, playersForTeamCount(newTags.size()));
+      saveSettings();
+      updateScores();
+      if (running_)
+        syncDiscord(false);
+    } else {
+      QStringList prev;
+      for (const auto &t : session_.tags())
+        prev << QString::fromStdString(t);
+      const QSignalBlocker blocker(tags_);
+      tags_->setText(prev.join(", "));
+      updateDetectedFormat();
+      setStatus(tr("集計中はチーム数を変更できません（タグ名の変更のみ可能です）"), "#ffb74d");
+    }
+  });
   connect(discordUserId_, &QLineEdit::editingFinished, this, [this] {
     const QString cleaned = configuredDiscordUserId();
     if (!cleaned.isEmpty() && cleaned != discordUserId_->text().trimmed()) {
@@ -967,7 +1004,7 @@ void MainDock::startAggregation() {
   lastPreviewMs_ = 0;
   capture_->setIntervalSeconds(0.250f);
   capture_->start();
-  for (auto *w : std::initializer_list<QWidget *>{source_, tags_, refresh_})
+  for (auto *w : std::initializer_list<QWidget *>{source_, refresh_})
     w->setEnabled(false);
   start_->setEnabled(false);
   stop_->setEnabled(true);
