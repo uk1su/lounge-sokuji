@@ -170,17 +170,16 @@ int main(int argc, char **argv) {
     auto *preview = dock->findChild<quickscore::ResultPreviewWidget *>("preview");
     auto *postDiscord = dock->findChild<QCheckBox *>("postDiscord");
     auto *raceHistory = dock->findChild<QComboBox *>("raceHistory");
-    auto *editRace = dock->findChild<QPushButton *>("editRace");
-    require(start && stop && reset && scores && state && preview && postDiscord && raceHistory &&
-                editRace,
+    require(start && stop && reset && scores && state && preview && postDiscord && raceHistory,
             "native widgets");
+    require(!dock->findChild<QPushButton *>("editRace"), "separate editRace button removed");
     require(start->isEnabled() && !stop->isEnabled(), "start/stop initial enabled state");
     require(!dock->findChild<QWidget *>("correction"), "duplicate 12-row bottom table removed");
     require(!dock->findChild<QWidget *>("format"), "format selector removed (auto from tag count)");
     auto *detectedFormat = dock->findChild<QLabel *>("detectedFormat");
     require(detectedFormat && detectedFormat->text() == QStringLiteral("2v2"),
             "6 tags automatically detected as 2v2");
-    require(!editRace->isEnabled(), "cannot edit before any race is recorded");
+    require(!raceHistory->isEnabled(), "cannot edit before any race is recorded");
     require(!dock->findChild<QComboBox *>("recognitionMode") &&
                 !dock->findChild<QLineEdit *>("geminiKey") &&
                 !dock->findChild<QCheckBox *>("autoCommit") &&
@@ -379,11 +378,12 @@ int main(int argc, char **argv) {
             .object();
     require(!stopDiscordJson["active"].toBool() && !stopDiscordJson["post_to_discord"].toBool(),
             "stop payload deactivates overlay with post_to_discord=false");
-    require(raceHistory->count() == 4 && editRace->isEnabled(), "four races in history");
-    raceHistory->setCurrentIndex(0);
-    editRace->click();
+    require(raceHistory->count() == 5 && raceHistory->isEnabled(),
+            "placeholder plus four races in history");
+    raceHistory->setCurrentIndex(1);
+    QMetaObject::invokeMethod(raceHistory, "activated", Q_ARG(int, 1));
     require(preview->isEditing() && preview->hasPreview() && preview->hasTagStrip(),
-            "editRace opens clickable right-side tag editor for 1R");
+            "selecting 1R directly opens clickable right-side tag editor");
     auto *reviewCourse = dock->findChild<QLineEdit *>("reviewCourse");
     require(reviewCourse && reviewCourse->isVisible(), "reviewCourse line edit visible");
     require(!dock->findChild<QWidget *>("totalRaces"), "totalRaces remains fixed at 12R");
@@ -396,8 +396,8 @@ int main(int argc, char **argv) {
         "う 71 (-6)／【M】65／L 64 (+1)／A 56 (+9)／B 36 (+29)／R 36 (+29)／現在2位／＠8");
     require(scores->text() == editedLine && !preview->isEditing(),
             "editing 1R updates total scores immediately");
-    require(raceHistory->itemText(0).contains(QStringLiteral("ドルフィンみさき")) &&
-                raceHistory->itemText(0).contains(QStringLiteral("補正済み")),
+    require(raceHistory->itemText(1).contains(QStringLiteral("ドルフィンみさき")) &&
+                raceHistory->itemText(1).contains(QStringLiteral("補正済み")),
             "race history shows resolved canonical course name and corrected badge");
     elapsed.restart();
     while (discordApi.count < 8 && elapsed.elapsed() < 5000)
@@ -442,8 +442,8 @@ int main(int argc, char **argv) {
       elapsed.restart();
       while (discordApi.count < 8 && elapsed.elapsed() < 5000)
         pump(blank, 50);
-      raceHistory->setCurrentIndex(0);
-      editRace->click();
+      raceHistory->setCurrentIndex(1);
+      QMetaObject::invokeMethod(raceHistory, "activated", Q_ARG(int, 1));
       require(preview->isEditing(), "ExistingRace editor opens while aggregation is running");
       pump(blank, 3500);
       require(preview->isEditing(),

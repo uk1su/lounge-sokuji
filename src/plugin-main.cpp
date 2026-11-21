@@ -17,6 +17,15 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 namespace {
 quickscore::MainDock *g_dock{};
+
+void onFrontendEvent(enum obs_frontend_event event, void *)
+{
+  if (!g_dock) return;
+  if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING ||
+      event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
+    QMetaObject::invokeMethod(g_dock, &quickscore::MainDock::refreshSources, Qt::QueuedConnection);
+  }
+}
 }
 
 bool obs_module_load(void)
@@ -39,6 +48,7 @@ bool obs_module_load(void)
     g_dock = nullptr;
     return false;
   }
+  obs_frontend_add_event_callback(onFrontendEvent, nullptr);
   blog(LOG_INFO, "[MK8DX QuickScore] loaded (%s TypeSafe Jev API, course + result captures)",
        QUICKSCORE_VERSION);
   return true;
@@ -46,6 +56,7 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+  obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
   if (g_dock) obs_frontend_remove_dock("mk8dx_quickscore_dock");
   g_dock = nullptr;
   blog(LOG_INFO, "[MK8DX QuickScore] unloaded");

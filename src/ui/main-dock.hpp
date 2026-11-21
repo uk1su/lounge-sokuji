@@ -85,11 +85,11 @@ public:
   ~MainDock() override;
 
   quint16 overlayPort() const { return overlayServer_ ? overlayServer_->port() : 0; }
+  void refreshSources();
 
 private:
   enum class EditMode { None, NewRace, ExistingRace, PendingFirstRace, CumulativeReconcile };
 
-  void refreshSources();
   std::vector<std::string> configuredTags() const;
   int configuredPlayersPerTeam() const;
   QString configuredDiscordUserId() const;
@@ -137,9 +137,9 @@ private:
   std::unique_ptr<DiscordSender> discord_;
   bool hasTestDiscordEndpoint_ = false;
   QLabel *status_{}, *diagnostic_{}, *courseLabel_{}, *scores_{}, *reviewHelp_{};
-  QWidget *reviewCourseRow_{};
+  QWidget *reviewCourseRow_{}, *reviewSubRow_{};
   ResultPreviewWidget *preview_{};
-  QPushButton *start_{}, *stop_{}, *refresh_{}, *confirm_{}, *cancel_{}, *retryRead_{}, *editRace_{};
+  QPushButton *start_{}, *stop_{}, *refresh_{}, *confirm_{}, *cancel_{}, *retryRead_{};
   std::unique_ptr<FrameCapture> capture_;
   std::unique_ptr<Analyzer> analyzer_;
   std::unique_ptr<OverlayServer> overlayServer_;

@@ -65,6 +65,21 @@ QWidget *buttons(std::initializer_list<QWidget *> widgets) {
     layout->addWidget(w);
   return row;
 }
+
+class SourceComboBox final : public QComboBox {
+public:
+  explicit SourceComboBox(std::function<void()> onBeforePopup, QWidget *parent = nullptr)
+      : QComboBox(parent), onBeforePopup_(std::move(onBeforePopup)) {}
+
+  void showPopup() override {
+    if (onBeforePopup_)
+      onBeforePopup_();
+    QComboBox::showPopup();
+  }
+
+private:
+  std::function<void()> onBeforePopup_;
+};
 QJsonArray evidenceJson(const Analysis &a) {
   QJsonArray result;
   for (size_t i = 0; i < a.standings.size(); ++i) {
@@ -390,7 +405,10 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   auto *form = new QGridLayout(setup);
   form->setContentsMargins(5, 4, 5, 4);
   form->setSpacing(4);
-  source_ = new QComboBox;
+  source_ = new SourceComboBox([this] {
+    if (!running_)
+      refreshSources();
+  });
   source_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
   source_->setMinimumContentsLength(5);
   source_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -506,14 +524,30 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   reviewCourseRow_->hide();
   layout->addWidget(reviewCourseRow_);
 
-  confirm_ = new QPushButton(tr("確定して集計"));
-  cancel_ = new QPushButton(tr("スキップ"));
-  retryRead_ = new QPushButton(tr("再判定"));
+  confirm_ = new QPushButton(tr("この内容で集計する"));
+  confirm_->setToolTip(tr("選んだチームとコースで点数を加算し、Discordへ送信します"));
+  confirm_->setStyleSheet(
+      "QPushButton{background:#2e7d32;color:#ffffff;font-weight:700;padding:5px 8px;"
+      "border:1px solid #43a047;border-radius:4px;font-size:12px;}"
+      "QPushButton:hover{background:#388e3c;}"
+      "QPushButton:disabled{background:#263238;color:#78909c;border-color:#37474f;}");
+  confirm_->hide();
+  layout->addWidget(confirm_);
+
+  const QString subBtnStyle =
+      "QPushButton{background:transparent;color:#9aa4b2;border:none;font-size:10.5px;padding:1px 6px;}"
+      "QPushButton:hover{color:#eceff1;text-decoration:underline;}"
+      "QPushButton:disabled{color:#546e7a;}";
+  cancel_ = new QPushButton(tr("保留して次へ"));
+  cancel_->setToolTip(tr("このレースをDiscordに「保留」と表示して次のレースへ進みます"));
+  cancel_->setStyleSheet(subBtnStyle);
+  retryRead_ = new QPushButton(tr("AI再読取"));
   retryRead_->setObjectName("retryRead");
-  retryRead_->setToolTip(tr("チームを再判定する"));
-  for (auto *b : {confirm_, cancel_, retryRead_})
-    b->hide();
-  layout->addWidget(buttons({confirm_, cancel_, retryRead_}));
+  retryRead_->setToolTip(tr("同じ画像をもう一度AIで読み直します（手動で直した行は維持）"));
+  retryRead_->setStyleSheet(subBtnStyle);
+  reviewSubRow_ = buttons({cancel_, retryRead_});
+  reviewSubRow_->hide();
+  layout->addWidget(reviewSubRow_);
 
   scores_ = new QLabel;
   scores_->setWordWrap(true);
@@ -541,10 +575,8 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   raceSelector_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
   raceSelector_->setMinimumContentsLength(6);
   raceSelector_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-  editRace_ = new QPushButton(tr("選択修正"));
-  editRace_->setObjectName("editRace");
-  editRace_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-  layout->addWidget(buttons({raceSelector_, editRace_}));
+  raceSelector_->setToolTip(tr("過去のレースを選ぶと、そのまま修正画面が開きます"));
+  layout->addWidget(raceSelector_);
 
   layout->addStretch();
 
@@ -612,7 +644,8 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
     }
   });
   connect(reset, &QPushButton::clicked, this, [this] { resetSession(); });
-  connect(editRace_, &QPushButton::clicked, this, [this] { openSelectedRaceEditor(); });
+  connect(raceSelector_, QOverload<int>::of(&QComboBox::activated), this,
+          [this](int) { openSelectedRaceEditor(); });
 
   preview_->setObjectName("preview");
   source_->setObjectName("source");
@@ -627,6 +660,10 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
 
   loadSettings();
   refreshSources();
+  QTimer::singleShot(1500, this, [this] {
+    if (!running_ && source_ && source_->count() <= 1)
+      refreshSources();
+  });
 
   QString overrideError;
   if (!loadSamples(configDirectory_ + "/player-overrides.json", playerOverrides_, overrideError))
@@ -1438,8 +1475,6 @@ void MainDock::review(const Analysis &analysis, EditMode mode, int raceIndex) {
   reviewOpenedMs_ = clock_.elapsed();
   if (raceSelector_)
     raceSelector_->setEnabled(false);
-  if (editRace_)
-    editRace_->setEnabled(false);
 
   const auto activeTags = session_.tags().empty() ? configuredTags() : session_.tags();
   reviewBaselineStandings_ = pending_.standings;
@@ -1449,18 +1484,21 @@ void MainDock::review(const Analysis &analysis, EditMode mode, int raceIndex) {
 
   if (mode == EditMode::ExistingRace || mode == EditMode::PendingFirstRace) {
     confirm_->setText(tr("修正を保存"));
-    cancel_->setText(tr("キャンセル"));
+    cancel_->setText(tr("やめる"));
   } else if (mode == EditMode::CumulativeReconcile) {
     confirm_->setText(tr("総合で検算"));
     cancel_->setText(tr("スキップ"));
     setStatus(tr("総合順位表（%1R）の右バッジを確認して検算してください。").arg(raceIndex),
               "#ffb74d");
   } else {
-    confirm_->setText(tr("確定して集計"));
-    cancel_->setText(tr("スキップ"));
+    confirm_->setText(tr("この内容で集計する"));
+    cancel_->setText(tr("保留して次へ"));
   }
-  for (auto *w : std::initializer_list<QWidget *>{confirm_, cancel_, retryRead_})
-    w->show();
+  confirm_->show();
+  if (reviewSubRow_)
+    reviewSubRow_->show();
+  cancel_->show();
+  retryRead_->show();
   if (reviewCourseRow_ && reviewCourse_) {
     const bool showCourseEdit = (mode != EditMode::CumulativeReconcile);
     reviewCourseRow_->setVisible(showCourseEdit);
@@ -1546,10 +1584,19 @@ void MainDock::learnOverridesFromReview(const std::vector<Standing> &confirmed) 
 }
 
 void MainDock::refreshRaceHistory() {
-  if (!raceSelector_ || !editRace_)
+  if (!raceSelector_)
     return;
-  const int prevData = raceSelector_->count() > 0 ? raceSelector_->currentData().toInt() : -99;
+  const QSignalBlocker blocker(raceSelector_);
   raceSelector_->clear();
+  const auto &races = session_.races();
+  const bool hasAny = session_.hasPendingFirstRace() || !races.empty();
+  if (!hasAny) {
+    raceSelector_->addItem(tr("確定レースなし"), -99);
+    raceSelector_->setEnabled(false);
+    return;
+  }
+  raceSelector_->addItem(
+      tr("過去のレースを修正... (全%1R)").arg(int(session_.effectiveRaceCount())), -99);
   if (session_.hasPendingFirstRace()) {
     QString pendingText = tr("1R");
     if (!session_.pendingFirstRaceCourse().empty())
@@ -1557,7 +1604,6 @@ void MainDock::refreshRaceHistory() {
     pendingText += tr(" (未確定・名前待ち)");
     raceSelector_->addItem(pendingText, -1);
   }
-  const auto &races = session_.races();
   for (size_t i = 0; i < races.size(); ++i) {
     QString text = races[i].label.empty() ? tr("%1R").arg(races[i].number)
                                           : QString::fromStdString(races[i].label);
@@ -1567,16 +1613,8 @@ void MainDock::refreshRaceHistory() {
       text += tr(" (補正済み)");
     raceSelector_->addItem(text, int(i));
   }
-  if (raceSelector_->count() == 0) {
-    raceSelector_->addItem(tr("確定レースなし"), -99);
-    raceSelector_->setEnabled(false);
-    editRace_->setEnabled(false);
-    return;
-  }
-  int restoreIdx = raceSelector_->findData(prevData);
-  raceSelector_->setCurrentIndex(restoreIdx >= 0 ? restoreIdx : raceSelector_->count() - 1);
+  raceSelector_->setCurrentIndex(0);
   raceSelector_->setEnabled(!reviewing_);
-  editRace_->setEnabled(!reviewing_);
 }
 
 void MainDock::openSelectedRaceEditor() {
@@ -1824,11 +1862,11 @@ void MainDock::cancelReview() {
   preview_->setEnabled(true);
   confirm_->setEnabled(true);
   retryRead_->setEnabled(true);
-  confirm_->setText(tr("確定して集計"));
-  cancel_->setText(tr("スキップ"));
+  confirm_->setText(tr("この内容で集計する"));
+  cancel_->setText(tr("保留して次へ"));
   reviewHelp_->setText(tr("右のバッジをクリックしてチームを選択してください。"));
   for (auto *w : std::initializer_list<QWidget *>{reviewHelp_, reviewCourseRow_, confirm_,
-                                                 cancel_, retryRead_})
+                                                 reviewSubRow_, cancel_, retryRead_})
     if (w)
       w->hide();
   refreshRaceHistory();
