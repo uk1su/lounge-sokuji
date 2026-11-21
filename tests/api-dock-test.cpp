@@ -280,6 +280,9 @@ int main(int argc, char **argv) {
     pump(image, 1200);
     require(scores->text() == firstLine && !preview->isEditing(), "stop cancels late API result");
     jevApi.delay = 0;
+    auto *discordUserId = dock->findChild<QLineEdit *>("discordUserId");
+    require(discordUserId != nullptr, "discordUserId input exists");
+    discordUserId->setText(QStringLiteral("<@123456789012345678>"));
     postDiscord->click();
     elapsed.restart();
     while (discordApi.count < 1 && elapsed.elapsed() < 5000)
@@ -291,8 +294,9 @@ int main(int argc, char **argv) {
     require(firstDiscordJson["score_line"].toString() == firstLine &&
                 firstDiscordJson["post_to_discord"].toBool() &&
                 !firstDiscordJson["active"].toBool() &&
-                firstDiscordJson["channel_id"].toString() == QStringLiteral("1571454531814952971"),
-            "discord_bot payload contains score_line, post_to_discord, active, and lounge channel_id");
+                firstDiscordJson["channel_id"].toString() == QStringLiteral("1571454531814952971") &&
+                firstDiscordJson["user_id"].toString() == QStringLiteral("123456789012345678"),
+            "discord_bot payload contains score_line, post_to_discord, active, channel_id, and user_id");
     start->click();
     elapsed.restart();
     while (discordApi.count < 2 && elapsed.elapsed() < 5000)

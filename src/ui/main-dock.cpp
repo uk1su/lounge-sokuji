@@ -412,12 +412,22 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   srcLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   auto *tagLbl = new QLabel(tr("タグ"));
   tagLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  auto *userLbl = new QLabel(tr("ユーザーID"));
+  userLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  discordUserId_ = new QLineEdit;
+  discordUserId_->setObjectName("discordUserId");
+  discordUserId_->setPlaceholderText(tr("DiscordユーザーID (17〜20桁の数字)"));
+  discordUserId_->setToolTip(
+      tr("自分のDiscordユーザーIDを入力すると、専用スレッド作成と個人オーバーレイが有効になります"));
+  discordUserId_->setMinimumWidth(60);
   form->addWidget(srcLbl, 0, 0);
   form->addWidget(source_, 0, 1);
   form->addWidget(refresh_, 0, 2);
   form->addWidget(tagLbl, 1, 0);
   form->addWidget(tags_, 1, 1);
   form->addWidget(detectedFormat_, 1, 2);
+  form->addWidget(userLbl, 2, 0);
+  form->addWidget(discordUserId_, 2, 1, 1, 2);
   form->setColumnStretch(1, 1);
   layout->addWidget(setup);
 
@@ -540,6 +550,14 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
 
   connect(refresh_, &QPushButton::clicked, this, [this] { refreshSources(); });
   connect(tags_, &QLineEdit::textChanged, this, [this] { updateDetectedFormat(); });
+  connect(discordUserId_, &QLineEdit::editingFinished, this, [this] {
+    const QString cleaned = configuredDiscordUserId();
+    if (!cleaned.isEmpty() && cleaned != discordUserId_->text().trimmed()) {
+      const QSignalBlocker blocker(discordUserId_);
+      discordUserId_->setText(cleaned);
+    }
+    saveSettings();
+  });
   connect(reviewCourse_, &QLineEdit::textEdited, this, [this] {
     if (reviewing_) {
       userTouchedReview_ = true;
@@ -758,6 +776,25 @@ std::vector<std::string> MainDock::configuredTags() const {
 
 int MainDock::configuredPlayersPerTeam() const {
   return playersForTeamCount(configuredTags().size());
+}
+
+QString MainDock::configuredDiscordUserId() const {
+  if (!discordUserId_)
+    return {};
+  QString raw = discordUserId_->text().trimmed();
+  if (raw.startsWith("<@") && raw.endsWith('>')) {
+    raw = raw.mid(2, raw.size() - 3);
+    if (raw.startsWith('!'))
+      raw = raw.mid(1);
+    raw = raw.trimmed();
+  }
+  if (raw.size() < 15 || raw.size() > 22)
+    return {};
+  for (const QChar ch : raw) {
+    if (!ch.isDigit() || ch.unicode() > 0x7f)
+      return {};
+  }
+  return raw;
 }
 
 void MainDock::updateDetectedFormat() {
@@ -2057,6 +2094,9 @@ QJsonObject MainDock::buildLoungePayload(bool postToDiscord, bool resetMatch) co
                   {"held_races", heldJson},
                   {"active", loungeOverlayActive_},
                   {"post_to_discord", postToDiscord}};
+  const QString userId = configuredDiscordUserId();
+  if (!userId.isEmpty())
+    obj.insert("user_id", userId);
   if (resetMatch)
     obj.insert("event", QStringLiteral("reset"));
   if (loungeOverlayUntilUtc_.isValid())
@@ -2116,12 +2156,15 @@ void MainDock::saveSettings() {
   s.setValue("schema", 11);
   s.setValue("sourceKey", source_->currentData());
   s.setValue("tags", tags_->text());
+  s.setValue("discordUserId", configuredDiscordUserId());
   s.setValue("postToDiscordChannel", postDiscord_->isChecked());
 }
 
 void MainDock::loadSettings() {
   QSettings s(configDirectory_ + "/settings.ini", QSettings::IniFormat);
   tags_->setText(s.value("tags", "A, B, C, D").toString());
+  if (discordUserId_)
+    discordUserId_->setText(s.value("discordUserId", "").toString());
   updateDetectedFormat();
   savedSource_ = s.value("schema", 0).toInt() >= 5 ? s.value("sourceKey").toString() : QString{};
   postDiscord_->setChecked(s.value("postToDiscordChannel", false).toBool());

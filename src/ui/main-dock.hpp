@@ -92,6 +92,7 @@ private:
   void refreshSources();
   std::vector<std::string> configuredTags() const;
   int configuredPlayersPerTeam() const;
+  QString configuredDiscordUserId() const;
   void updateDetectedFormat();
   void startAggregation();
   void stopAggregation(bool autoFinished = false, bool syncOverlay = true);
@@ -127,7 +128,7 @@ private:
 
   QString configDirectory_, savedSource_;
   QComboBox *source_{}, *raceSelector_{};
-  QLineEdit *tags_{}, *reviewCourse_{};
+  QLineEdit *tags_{}, *discordUserId_{}, *reviewCourse_{};
   QLabel *detectedFormat_{};
   std::unique_ptr<JevApiReader> api_;
   bool requestIssued_ = false;

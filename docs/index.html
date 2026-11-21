@@ -216,7 +216,10 @@
     const apiBase = (
       params.get('api') || 'https://140-245-94-102.sslip.io'
     ).replace(/\/+$/, '');
-    const loungeEndpoint = `${apiBase}/api/v1/lounge/current`;
+    const userId = (params.get('user') || params.get('id') || '').trim();
+    const loungeEndpoint = userId
+      ? `${apiBase}/api/v1/lounge/user/${encodeURIComponent(userId)}`
+      : `${apiBase}/api/v1/lounge/current`;
 
     function hideOverlay() {
       document.querySelectorAll('.overlay-container').forEach((el) => {
