@@ -434,9 +434,9 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   userLbl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
   discordUserId_ = new QLineEdit;
   discordUserId_->setObjectName("discordUserId");
-  discordUserId_->setPlaceholderText(tr("DiscordユーザーID (17〜20桁の数字)"));
+  discordUserId_->setPlaceholderText(tr("Discordユーザー名 (例: uk.i) または数字ID"));
   discordUserId_->setToolTip(
-      tr("自分のDiscordユーザーIDを入力すると、専用スレッド作成と個人オーバーレイが有効になります"));
+      tr("Discordの@ユーザー名（例: uk.i）または数字のユーザーIDを入力すると、専用スレッド作成と個人オーバーレイが有効になります"));
   discordUserId_->setMinimumWidth(60);
   form->addWidget(srcLbl, 0, 0);
   form->addWidget(source_, 0, 1);
@@ -825,10 +825,13 @@ QString MainDock::configuredDiscordUserId() const {
       raw = raw.mid(1);
     raw = raw.trimmed();
   }
-  if (raw.size() < 15 || raw.size() > 22)
+  while (raw.startsWith('@'))
+    raw.remove(0, 1);
+  raw = raw.trimmed();
+  if (raw.isEmpty() || raw.size() > 64)
     return {};
   for (const QChar ch : raw) {
-    if (!ch.isDigit() || ch.unicode() > 0x7f)
+    if (ch.isSpace())
       return {};
   }
   return raw;
