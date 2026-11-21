@@ -352,23 +352,34 @@ void ResultPreviewWidget::leaveEvent(QEvent *event) {
   QWidget::leaveEvent(event);
 }
 
+void ResultPreviewWidget::openTagMenuForRow(int row) {
+  if (!editing_ || row < 0 || row >= 12)
+    return;
+  QMenu menu(this);
+  auto *clearAct = menu.addAction(tr("未選択"));
+  clearAct->setData(QString{});
+  for (const auto &t : teamTags_) {
+    const QString qtag = QString::fromStdString(t);
+    QPixmap swatch(14, 14);
+    swatch.fill(colorForTeamTag(t, teamTags_));
+    auto *act = menu.addAction(QIcon(swatch), qtag);
+    act->setData(qtag);
+  }
+  QAction *picked = menu.exec(mapToGlobal(badgeRects_[size_t(row)].bottomLeft()));
+  if (picked)
+    setRowTag(row, picked->data().toString());
+}
+
 void ResultPreviewWidget::mousePressEvent(QMouseEvent *event) {
-  if (editing_ && event->button() == Qt::LeftButton) {
+  if (event->button() == Qt::LeftButton) {
     const int row = hitRow(event->pos());
-    if (row >= 0) {
-      QMenu menu(this);
-      auto *clearAct = menu.addAction(tr("未選択"));
-      clearAct->setData(QString{});
-      for (const auto &t : teamTags_) {
-        const QString qtag = QString::fromStdString(t);
-        QPixmap swatch(14, 14);
-        swatch.fill(colorForTeamTag(t, teamTags_));
-        auto *act = menu.addAction(QIcon(swatch), qtag);
-        act->setData(qtag);
+    if (editing_) {
+      if (row >= 0) {
+        openTagMenuForRow(row);
+        return;
       }
-      QAction *picked = menu.exec(mapToGlobal(badgeRects_[size_t(row)].bottomLeft()));
-      if (picked)
-        setRowTag(row, picked->data().toString());
+    } else if (!cropped_.isNull() && onEditRequested_) {
+      onEditRequested_(row);
       return;
     }
   }
@@ -497,6 +508,20 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   layout->addWidget(courseLabel_);
 
   preview_ = new ResultPreviewWidget;
+  preview_->setOnEditRequested([this](int row) {
+    if (reviewing_)
+      return;
+    int data = -99;
+    if (!session_.races().empty())
+      data = int(session_.races().size()) - 1;
+    else if (session_.hasPendingFirstRace())
+      data = -1;
+    if (data == -99)
+      return;
+    openRaceEditorByData(data);
+    if (reviewing_ && row >= 0)
+      preview_->openTagMenuForRow(row);
+  });
   preview_->setPlaceholderText(tr("集計開始後、ここにリザルトを表示します"));
   preview_->setOnEdited([this] {
     userTouchedReview_ = true;
@@ -1661,6 +1686,12 @@ void MainDock::openSelectedRaceEditor() {
   if (reviewing_ || !raceSelector_)
     return;
   const int data = raceSelector_->currentData().toInt();
+  openRaceEditorByData(data);
+}
+
+void MainDock::openRaceEditorByData(int data) {
+  if (reviewing_)
+    return;
   if (data == -99)
     return;
   Analysis loaded;

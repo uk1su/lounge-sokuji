@@ -45,9 +45,11 @@ public:
   bool hasPreview() const { return !cropped_.isNull(); }
   bool hasTagStrip() const { return standings_.size() == 12; }
   void setRowTag(int row, const QString &tag);
+  void openTagMenuForRow(int row);
   QString rowTag(int row) const;
   std::vector<Standing> standings() const { return standings_; }
   void setOnEdited(std::function<void()> cb) { onEdited_ = std::move(cb); }
+  void setOnEditRequested(std::function<void(int)> cb) { onEditRequested_ = std::move(cb); }
 
   QSize sizeHint() const override;
   QSize minimumSizeHint() const override;
@@ -76,6 +78,7 @@ private:
   QRect drawRect_;
   std::array<QRect, 12> badgeRects_{};
   std::function<void()> onEdited_;
+  std::function<void(int)> onEditRequested_;
 };
 
 class MainDock final : public QWidget {
@@ -112,6 +115,7 @@ private:
   QString editedReviewCourse() const;
   void refreshRaceHistory();
   void openSelectedRaceEditor();
+  void openRaceEditorByData(int data);
   std::vector<Standing> currentEditorStandings() const;
   void updatePreview(const QImage &frame, const std::vector<Standing> &standings = {});
   void saveSettings();
