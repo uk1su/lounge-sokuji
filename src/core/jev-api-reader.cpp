@@ -31,22 +31,87 @@ Analysis failed(Analysis frame, const QString &error) {
 bool probability(const QJsonValue &v) {
   return v.isDouble() && std::isfinite(v.toDouble()) && v.toDouble() >= 0 && v.toDouble() <= 1;
 }
+QImage cropNameHead(const QImage &frame, int row) {
+  constexpr int kBaseX = 1013;
+  constexpr int kCropW = 92;
+  constexpr int kCropH = 54;
+  constexpr int kMaxScanX = 1248;
+  const int baseY = 85 + 78 * row;
+
+  // Estimate row background from the top margin strip (pure row bg: dark or yellow highlight).
+  int bgR = 0, bgG = 0, bgB = 0, bgN = 0;
+  for (int y = baseY + 2; y <= baseY + 5; ++y) {
+    for (int x = kBaseX; x < kBaseX + 12; ++x) {
+      const QRgb px = frame.pixel(x, y);
+      bgR += qRed(px);
+      bgG += qGreen(px);
+      bgB += qBlue(px);
+      ++bgN;
+    }
+  }
+  if (bgN > 0) {
+    bgR /= bgN;
+    bgG /= bgN;
+    bgB /= bgN;
+  }
+
+  int startX = kBaseX;
+  for (int x = kBaseX; x <= kMaxScanX; ++x) {
+    int fg = 0;
+    for (int y = baseY + 10; y <= baseY + 44; ++y) {
+      const QRgb px = frame.pixel(x, y);
+      const int dist =
+          std::abs(qRed(px) - bgR) + std::abs(qGreen(px) - bgG) + std::abs(qBlue(px) - bgB);
+      if (dist >= 140)
+        ++fg;
+    }
+    if (fg >= 4) {
+      if (x > kBaseX + 12)
+        startX = std::min(kMaxScanX, std::max(kBaseX, x - 8));
+      break;
+    }
+  }
+  return frame.copy(startX, baseY, kCropW, kCropH);
+}
 } // namespace
 QImage jevMontage(const QImage &frame) {
   if (frame.size() != QSize(1920, 1080))
     return {};
   QImage image(480, 448, QImage::Format_RGB32);
-  image.fill(QColor(32, 32, 32));
+  image.fill(QColor(20, 20, 20));
   QPainter p(&image);
-  p.setPen(Qt::white);
   auto font = p.font();
-  font.setPixelSize(14);
+  font.setPixelSize(13);
+  font.setBold(true);
   p.setFont(font);
+  const QPen borderPen(QColor(170, 170, 170), 2);
   for (int row = 0; row < 12; ++row) {
     const int x = (row % 3) * 160, y = (row / 3) * 112;
-    p.drawText(x + 6, y + 17, QString("Rank %1").arg(row + 1));
-    p.drawImage(QRect(x + 6, y + 23, 138, 81), frame.copy(1013, 85 + 78 * row, 92, 54));
+    p.fillRect(QRect(x + 3, y + 3, 154, 106), QColor(30, 30, 30));
+    p.setPen(borderPen);
+    p.drawRect(QRect(x + 3, y + 3, 154, 106));
+    p.setPen(Qt::white);
+    p.drawText(x + 10, y + 19, QString("Rank %1").arg(row + 1));
+    p.drawImage(QRect(x + 11, y + 25, 138, 78), cropNameHead(frame, row));
   }
+  return image;
+}
+QImage jevSingleCell(const QImage &frame, int row) {
+  if (frame.size() != QSize(1920, 1080) || row < 0 || row >= 12)
+    return {};
+  QImage image(224, 144, QImage::Format_RGB32);
+  image.fill(QColor(20, 20, 20));
+  QPainter p(&image);
+  p.fillRect(QRect(4, 4, 216, 136), QColor(30, 30, 30));
+  p.setPen(QPen(QColor(170, 170, 170), 2));
+  p.drawRect(QRect(4, 4, 216, 136));
+  auto font = p.font();
+  font.setPixelSize(14);
+  font.setBold(true);
+  p.setFont(font);
+  p.setPen(Qt::white);
+  p.drawText(12, 22, QString("Rank %1").arg(row + 1));
+  p.drawImage(QRect(20, 28, 184, 108), cropNameHead(frame, row));
   return image;
 }
 QJsonObject jevRequest(const std::vector<std::string> &tags, const QString &reference) {
@@ -61,6 +126,27 @@ QJsonObject jevRequest(const std::vector<std::string> &tags, const QString &refe
                                                       .arg(row + 1).arg(row / 3 + 1).arg(row % 3 + 1)}});
   return {{"model", "jev-1.14.0"},
           {"state", QJsonObject{{"montage", reference}, {"rules", "Match ONLY the FIRST visible character (Latin or Japanese Kana/Kanji) of each player name against the team criteria, ignoring suffixes and minor background texture. Choose unknown only if unreadable or covered by a system banner."}}},
+          {"assets", QJsonObject{{reference, QJsonObject{{"type", "image"}, {"part", "montage"}}}}},
+          {"questions", questions}};
+}
+QJsonObject jevSingleRequest(const std::vector<std::string> &tags, int row,
+                             const QString &reference) {
+  QJsonObject criteria, questions;
+  for (size_t i = 0; i < tags.size(); ++i)
+    criteria.insert(QString("team%1").arg(i), first(tags[i]));
+  criteria.insert("unknown", "Unreadable or no match.");
+  questions.insert(QString("rank%1").arg(row + 1),
+                   QJsonObject{{"type", "choice"},
+                               {"criteria", criteria},
+                               {"instructions",
+                                QString("First name character for Rank %1 shown in this single image?")
+                                    .arg(row + 1)}});
+  return {{"model", "jev-1.14.0"},
+          {"state",
+           QJsonObject{
+               {"cell", reference},
+               {"rules",
+                "Match ONLY the FIRST visible character (Latin or Japanese Kana/Kanji) of the player name shown in this image against the team criteria, ignoring suffixes and minor background texture. Choose unknown only if unreadable or covered by a system banner."}}},
           {"assets", QJsonObject{{reference, QJsonObject{{"type", "image"}, {"part", "montage"}}}}},
           {"questions", questions}};
 }
@@ -229,6 +315,18 @@ void JevApiReader::read(Analysis frame, std::vector<std::string> tags, Completio
               lastModel = doc.object()["model"].toString();
               auto result = parseJevResponse(doc.object(), std::move(frame), tags);
               reply->deleteLater();
+              std::vector<int> unresolved;
+              if (result.error.isEmpty()) {
+                for (int r = 0; r < 12; ++r) {
+                  if (result.standings[size_t(r)].tag.empty())
+                    unresolved.push_back(r);
+                }
+              }
+              if (!unresolved.empty() && unresolved.size() <= 4 && !result.image.isNull()) {
+                retryUnresolvedRows(std::move(result), std::move(tags), std::move(unresolved), 0,
+                                    serial, std::move(done));
+                return;
+              }
               done(std::move(result));
             } else {
               const auto netErr = reply->error();
@@ -262,6 +360,128 @@ void JevApiReader::read(Analysis frame, std::vector<std::string> tags, Completio
               reply->deleteLater();
               done(failed(std::move(frame), msg));
             }
+          });
+}
+void JevApiReader::retryUnresolvedRows(Analysis frame, std::vector<std::string> tags,
+                                       std::vector<int> rows, size_t index, uint64_t serial,
+                                       Completion done) {
+  if (serial != serial_)
+    return;
+  if (index >= rows.size()) {
+    enforceTwelfthFinishNotice(frame, tags);
+    done(std::move(frame));
+    return;
+  }
+  const int row = rows[index];
+  const auto image = jevSingleCell(frame.image, row);
+  QByteArray png;
+  QBuffer buffer(&png);
+  buffer.open(QIODevice::WriteOnly);
+  if (image.isNull() || !image.save(&buffer, "PNG", 85)) {
+    retryUnresolvedRows(std::move(frame), std::move(tags), std::move(rows), index + 1, serial,
+                        std::move(done));
+    return;
+  }
+  auto *parts = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+  const auto ref = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  QHttpPart json;
+  json.setHeader(QNetworkRequest::ContentDispositionHeader, "form-data; name=\"request\"");
+  json.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+  json.setBody(QJsonDocument(jevSingleRequest(tags, row, ref)).toJson(QJsonDocument::Compact));
+  parts->append(json);
+  QHttpPart photo;
+  photo.setHeader(QNetworkRequest::ContentDispositionHeader,
+                  "form-data; name=\"montage\"; filename=\"cell.png\"");
+  photo.setHeader(QNetworkRequest::ContentTypeHeader, "image/png");
+  photo.setBody(png);
+  parts->append(photo);
+  QNetworkRequest request(endpoint_.isEmpty() ? QUrl("https://api.typesafe.ai/v1/systemone")
+                                              : endpoint_);
+  request.setRawHeader("Authorization", "Bearer " + key().toUtf8());
+  request.setRawHeader("TypeSafe-Danger-Zone-Images", "true");
+  request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                       QNetworkRequest::ManualRedirectPolicy);
+  request.setTransferTimeout(10000);
+  auto *reply = manager_.post(request, parts);
+  parts->setParent(reply);
+  reply_ = reply;
+  auto payload = std::make_shared<QByteArray>();
+  constexpr qint64 limit = 256 * 1024;
+  reply->setReadBufferSize(limit + 1);
+  connect(reply, &QIODevice::readyRead, this, [reply, payload] {
+    *payload += reply->readAll();
+    if (payload->size() > limit)
+      reply->abort();
+  });
+  QTimer::singleShot(10000, reply, [reply] {
+    if (!reply->isFinished())
+      reply->abort();
+  });
+  connect(reply, &QNetworkReply::finished, this,
+          [this, reply, serial, payload, row, frame = std::move(frame), tags = std::move(tags),
+           rows = std::move(rows), index, done = std::move(done)]() mutable {
+            if (serial != serial_) {
+              reply->deleteLater();
+              return;
+            }
+            reply_ = nullptr;
+            *payload += reply->readAll();
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            QJsonParseError parse;
+            const auto doc = QJsonDocument::fromJson(*payload, &parse);
+            reply->deleteLater();
+            if (status == 200 && reply->error() == QNetworkReply::NoError &&
+                payload->size() <= limit && parse.error == QJsonParseError::NoError &&
+                doc.isObject()) {
+              const auto obj = doc.object();
+              const auto answers = obj["answers"].toObject();
+              const auto a = answers[QString("rank%1").arg(row + 1)].toObject();
+              const auto probs = a["probabilities"].toObject();
+              const auto choice = a["choice"].toString();
+              bool valid = obj["model"].toString() == "jev-1.14.0" && a["type"] == "choice" &&
+                           probability(a["confidence"]) && probs.size() == int(tags.size() + 1);
+              double best = -1, second = -1, total = 0;
+              QString winner;
+              for (size_t i = 0; i <= tags.size(); ++i) {
+                const auto name = i == tags.size() ? QString("unknown") : QString("team%1").arg(i);
+                const auto v = probs[name];
+                valid = valid && probability(v);
+                const auto value = v.toDouble(-1);
+                total += value;
+                if (value > best) {
+                  second = best;
+                  best = value;
+                  winner = name;
+                } else {
+                  second = std::max(second, value);
+                }
+              }
+              valid = valid && std::abs(total - 1) < .05 && winner == choice;
+              if (valid) {
+                for (size_t i = 0; i < tags.size(); ++i) {
+                  if (choice == QString("team%1").arg(i)) {
+                    const double conf = a["confidence"].toDouble();
+                    const double margin = best - second;
+                    if ((best >= .90 && margin >= .25 && conf >= .90) ||
+                        (best >= .85 && margin >= .45 && conf >= .85)) {
+                      frame.standings[size_t(row)].tag = tags[i];
+                      frame.standings[size_t(row)].confidence = std::min(best, conf);
+                      auto &e = frame.evidence[size_t(row)];
+                      e.method = QStringLiteral("Jev API (単体再確認) / ") + obj["model"].toString();
+                      e.similarity = best;
+                      e.closestTag = tags[i];
+                      e.closestScore = best;
+                      e.text = QString("%1 / confidence %2 / margin %3")
+                                   .arg(choice)
+                                   .arg(conf)
+                                   .arg(margin);
+                    }
+                  }
+                }
+              }
+            }
+            retryUnresolvedRows(std::move(frame), std::move(tags), std::move(rows), index + 1,
+                                serial, std::move(done));
           });
 }
 } // namespace quickscore

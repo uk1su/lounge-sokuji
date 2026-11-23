@@ -544,13 +544,23 @@ void tests() {
             "CPU slot evidence marks CPU auto-fill");
     require(cpuCase.error.isEmpty(), "CPU resolution clears single-slot error");
 
-    quickscore::Analysis twoMissing = cpuCase;
-    twoMissing.standings[5].tag.clear();
-    twoMissing.standings[5].confidence = 0.0;
-    twoMissing.standings[1].tag.clear();
-    twoMissing.standings[1].confidence = 0.0;
-    require(!quickscore::resolveSingleDeficitRow(twoMissing, {"A", "B", "C", "D"}, 3),
-            "resolveSingleDeficitRow rejects 2 missing rows");
+    quickscore::Analysis twoSameTeam = cpuCase;
+    twoSameTeam.standings[5].tag.clear();
+    twoSameTeam.standings[5].confidence = 0.0;
+    twoSameTeam.standings[1].tag.clear();
+    twoSameTeam.standings[1].confidence = 0.0;
+    require(quickscore::resolveSingleDeficitRow(twoSameTeam, {"A", "B", "C", "D"}, 3),
+            "resolveSingleDeficitRow fills 2 missing rows when only 1 team has a deficit");
+    require(twoSameTeam.standings[5].tag == "B" && twoSameTeam.standings[1].tag == "B",
+            "both single-deficit rows resolved to team B");
+
+    quickscore::Analysis twoDiffTeams = cpuCase;
+    twoDiffTeams.standings[5].tag.clear();
+    twoDiffTeams.standings[5].confidence = 0.0;
+    twoDiffTeams.standings[2].tag.clear();
+    twoDiffTeams.standings[2].confidence = 0.0;
+    require(!quickscore::resolveSingleDeficitRow(twoDiffTeams, {"A", "B", "C", "D"}, 3),
+            "resolveSingleDeficitRow rejects 2 missing rows across 2 different teams");
   }
 
   {

@@ -118,6 +118,28 @@ int main(int argc, char **argv) {
 
       require(jevMontage(captured.image).size() == QSize(480, 448),
               "vision dimensions within official limits");
+
+      // Leading-space auto-trim test: white glyph on dark bg (row 0) and dark glyph on yellow bg
+      // (row 1), both shifted +75px right (like two full-width spaces before the tag).
+      QImage spaced(1920, 1080, QImage::Format_ARGB32);
+      spaced.fill(QColor(30, 30, 30));
+      for (int y = 85 + 78; y < 85 + 78 + 54; ++y)
+        for (int x = 1013; x < 1340; ++x)
+          spaced.setPixelColor(x, y, QColor(250, 230, 0));
+      for (int y = 85 + 14; y < 85 + 42; ++y)
+        for (int x = 1013 + 75; x < 1013 + 85; ++x)
+          spaced.setPixelColor(x, y, QColor(255, 255, 255));
+      for (int y = 85 + 78 + 14; y < 85 + 78 + 42; ++y)
+        for (int x = 1013 + 75; x < 1013 + 85; ++x)
+          spaced.setPixelColor(x, y, QColor(30, 30, 30));
+      const QImage cell0 = jevSingleCell(spaced, 0);
+      const QImage cell1 = jevSingleCell(spaced, 1);
+      require(cell0.size() == QSize(224, 144) && cell1.size() == QSize(224, 144),
+              "single cell dimensions");
+      // After auto-trim, glyph starts around x=8 in the 92px crop -> x=20+16=36 in 224px cell.
+      require(qRed(cell0.pixel(40, 72)) > 200, "auto-trim aligns shifted white glyph on dark bg");
+      require(qRed(cell1.pixel(40, 72)) < 80, "auto-trim aligns shifted dark glyph on yellow bg");
+
       const auto request = jevRequest(tags, "unique-image-reference");
       require(request["questions"].toObject().size() == 12 &&
                   request["assets"].toObject().size() == 1,

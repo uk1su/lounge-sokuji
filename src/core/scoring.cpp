@@ -361,6 +361,75 @@ bool Session::reconcileWithCumulativeTotals(const std::map<std::string, int> &ga
     const auto current = totals();
     if (current == gameTotals) return true;
     const auto committed = committedTotals();
+
+    // Check if the discrepancy is a clean 2-team swap (+delta for teamGain, -delta for teamLose)
+    // in a single past race (e.g., an auto-filled tag was actually swapped with another team).
+    std::string teamGain, teamLose;
+    int swapDelta = 0;
+    int nonZeroTeams = 0;
+    for (const auto &t : tags_) {
+      const int delta = gameTotals.at(t) - (committed.count(t) ? committed.at(t) : 0);
+      if (delta != 0) {
+        ++nonZeroTeams;
+        if (delta > 0) {
+          teamGain = t;
+          swapDelta = delta;
+        } else {
+          teamLose = t;
+        }
+      }
+    }
+    if (nonZeroTeams == 2 && !teamGain.empty() && !teamLose.empty() &&
+        (gameTotals.at(teamLose) - (committed.count(teamLose) ? committed.at(teamLose) : 0)) ==
+            -swapDelta) {
+      struct SwapCandidate {
+        size_t raceIdx;
+        size_t loseIdx;
+        size_t gainIdx;
+      };
+      std::vector<SwapCandidate> candidates;
+      constexpr std::array<int, 12> kPts{15, 12, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+      for (size_t ri = 0; ri < races_.size(); ++ri) {
+        const auto &r = races_[ri];
+        if (r.corrected || r.raceSpan != 1 || r.standings.size() != 12)
+          continue;
+        for (size_t i = 0; i < 12; ++i) {
+          if (r.standings[i].tag != teamLose || r.standings[i].rank < 1 || r.standings[i].rank > 12)
+            continue;
+          const int ptLose = kPts[size_t(r.standings[i].rank - 1)];
+          for (size_t j = 0; j < 12; ++j) {
+            if (r.standings[j].tag != teamGain || r.standings[j].rank < 1 ||
+                r.standings[j].rank > 12)
+              continue;
+            const int ptGain = kPts[size_t(r.standings[j].rank - 1)];
+            if (ptLose - ptGain == swapDelta) {
+              candidates.push_back({ri, i, j});
+            }
+          }
+        }
+      }
+      if (candidates.size() > 1) {
+        std::vector<SwapCandidate> lowConf;
+        for (const auto &c : candidates) {
+          const auto &r = races_[c.raceIdx];
+          if (r.standings[c.loseIdx].confidence < 0.99 || r.standings[c.gainIdx].confidence < 0.99)
+            lowConf.push_back(c);
+        }
+        if (lowConf.size() == 1)
+          candidates = std::move(lowConf);
+      }
+      if (candidates.size() == 1) {
+        const auto &c = candidates[0];
+        auto &r = races_[c.raceIdx];
+        std::swap(r.standings[c.loseIdx].tag, r.standings[c.gainIdx].tag);
+        r.points = scoreRace(r.standings);
+        r.corrected = true;
+        teamAdjustments_.clear();
+        if (changed) *changed = true;
+        return true;
+      }
+    }
+
     teamAdjustments_.clear();
     for (const auto &t : tags_) {
       const int delta = gameTotals.at(t) - (committed.count(t) ? committed.at(t) : 0);

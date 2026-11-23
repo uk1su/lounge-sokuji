@@ -7,7 +7,10 @@
 #include <functional>
 namespace quickscore {
 QImage jevMontage(const QImage &frame);
+QImage jevSingleCell(const QImage &frame, int row);
 QJsonObject jevRequest(const std::vector<std::string> &tags, const QString &reference);
+QJsonObject jevSingleRequest(const std::vector<std::string> &tags, int row,
+                             const QString &reference);
 Analysis parseJevResponse(const QJsonObject &reply, Analysis captured,
                           const std::vector<std::string> &tags);
 class JevApiReader final : public QObject {
@@ -25,6 +28,8 @@ public:
   QString lastModel;
 
 private:
+  void retryUnresolvedRows(Analysis frame, std::vector<std::string> tags, std::vector<int> rows,
+                           size_t index, uint64_t serial, Completion done);
   QString key() const;
   QString profile_;
   QUrl endpoint_;

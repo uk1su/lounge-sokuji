@@ -607,11 +607,11 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
 
   connect(refresh_, &QPushButton::clicked, this, [this] { refreshSources(); });
   connect(tags_, &QLineEdit::textChanged, this, [this] { updateDetectedFormat(); });
+  connect(tags_, &QLineEdit::textEdited, this, [this] { saveSettings(); });
   connect(tags_, &QLineEdit::editingFinished, this, [this] {
-    if (session_.tags().empty()) {
-      saveSettings();
+    saveSettings();
+    if (session_.tags().empty())
       return;
-    }
     const auto newTags = configuredTags();
     if (newTags == session_.tags())
       return;
@@ -622,7 +622,6 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
           s.tag.clear();
         }
       }
-      saveSettings();
       updateScores();
       if (running_ || !session_.races().empty())
         syncDiscord(!session_.races().empty());
@@ -630,18 +629,11 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
     } else if (session_.races().empty() && !session_.hasPendingFirstRace() &&
                playersForTeamCount(newTags.size()) > 0) {
       session_.configure(newTags, playersForTeamCount(newTags.size()));
-      saveSettings();
       updateScores();
       if (running_)
         syncDiscord(false);
-    } else {
-      QStringList prev;
-      for (const auto &t : session_.tags())
-        prev << QString::fromStdString(t);
-      const QSignalBlocker blocker(tags_);
-      tags_->setText(prev.join(", "));
-      updateDetectedFormat();
-      setStatus(tr("集計中はチーム数を変更できません（タグ名の変更のみ可能です）"), "#ffb74d");
+    } else if (running_) {
+      setStatus(tr("タグを保存しました（チーム数変更はリセット後に反映されます）"), "#ffb74d");
     }
   });
   connect(discordUserId_, &QLineEdit::editingFinished, this, [this] {
@@ -1305,8 +1297,7 @@ void MainDock::requestRetryRecognition() {
       }
     }
     enforceTwelfthFinishNotice(result, session_.tags());
-    if (session_.hasAutoConfirmedRace())
-      resolveSingleDeficitRow(result, session_.tags(), session_.playersPerTeam());
+    resolveSingleDeficitRow(result, session_.tags(), session_.playersPerTeam());
     api_->cancel();
     confirm_->setEnabled(true);
     preview_->setEnabled(true);
@@ -1356,8 +1347,7 @@ void MainDock::requestRecognition(const Analysis &captured) {
       return;
     applyPlayerOverrides(result, playerOverrides_, session_.tags());
     enforceTwelfthFinishNotice(result, session_.tags());
-    if (session_.hasAutoConfirmedRace())
-      resolveSingleDeficitRow(result, session_.tags(), session_.playersPerTeam());
+    resolveSingleDeficitRow(result, session_.tags(), session_.playersPerTeam());
     resultCapture_.insert("apiModel", api_->lastModel);
     resultCapture_.insert("apiUsage", api_->lastUsage);
     latest_ = std::move(result);
@@ -1441,6 +1431,7 @@ void MainDock::requestStandingsVerification(const Analysis &captured) {
       return;
     result.cumulativeScores = captured.cumulativeScores;
     applyPlayerOverrides(result, playerOverrides_, session_.tags());
+    resolveSingleDeficitRow(result, session_.tags(), session_.playersPerTeam());
     const auto validation = session_.validate(result.standings);
     if (!result.error.isEmpty() || !validation.ok) {
       review(result, EditMode::CumulativeReconcile, impliedRaces);

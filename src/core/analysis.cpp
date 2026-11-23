@@ -1013,32 +1013,35 @@ bool resolveSingleDeficitRow(Analysis &analysis, const std::vector<std::string> 
       unresolved.push_back(r);
     }
   }
-  if (unresolved.size() != 1)
+  if (unresolved.empty())
     return false;
 
   std::string deficitTag;
+  int deficitCount = 0;
   for (const auto &t : tags) {
     if (counts[t] == playersPerTeam)
       continue;
-    if (counts[t] == playersPerTeam - 1 && deficitTag.empty()) {
+    if (counts[t] < playersPerTeam && deficitTag.empty()) {
       deficitTag = t;
+      deficitCount = playersPerTeam - counts[t];
     } else {
       return false;
     }
   }
-  if (deficitTag.empty())
+  if (deficitTag.empty() || deficitCount != int(unresolved.size()))
     return false;
 
-  const size_t u = unresolved[0];
   if (analysis.evidence.size() != 12)
     analysis.evidence.resize(12);
-  analysis.standings[u].rank = int(u + 1);
-  analysis.standings[u].tag = deficitTag;
-  analysis.standings[u].confidence = 0.95;
-  analysis.evidence[u].closestTag = deficitTag;
-  analysis.evidence[u].closestScore = 0.95;
-  analysis.evidence[u].similarity = 0.95;
-  analysis.evidence[u].method = QStringLiteral("欠員・CPU自動補完");
+  for (const size_t u : unresolved) {
+    analysis.standings[u].rank = int(u + 1);
+    analysis.standings[u].tag = deficitTag;
+    analysis.standings[u].confidence = 0.95;
+    analysis.evidence[u].closestTag = deficitTag;
+    analysis.evidence[u].closestScore = 0.95;
+    analysis.evidence[u].similarity = 0.95;
+    analysis.evidence[u].method = QStringLiteral("欠員・CPU自動補完");
+  }
   analysis.error.clear();
   return true;
 }

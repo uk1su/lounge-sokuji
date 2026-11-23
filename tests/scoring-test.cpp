@@ -135,5 +135,33 @@ int main()
   gateSession.reset();
   assert(!gateSession.hasAutoConfirmedRace());
 
+  // 8) 2-team swap reconciliation from cumulative totals (e.g., 1R auto-fill E->D was actually
+  //    swapped with 1st-place A, revealed by Race 2 cumulative totals)
+  quickscore::Session swapSession;
+  swapSession.configure({"A", "B", "C", "D"}, 3);
+  std::vector<quickscore::Standing> r1Recorded{
+      {1, "A", 1.0},  {2, "A", 1.0},  {3, "A", 1.0},  {4, "B", 1.0},
+      {5, "B", 1.0},  {6, "B", 1.0},  {7, "C", 1.0},  {8, "C", 1.0},
+      {9, "C", 1.0},  {10, "D", 1.0}, {11, "D", 1.0}, {12, "D", 0.95}};
+  assert(swapSession.commit(r1Recorded, false));
+  // True Race 1 had 1st=D (15pt) and 12th=A (1pt), so A is -14 and D is +14 vs recorded.
+  // Recorded R1: A=37, B=24, C=15, D=6. True R1: A=23, B=24, C=15, D=20.
+  // Race 2: A=25, B=20, C=20, D=17 -> True cumulative after 2R: A=48, B=44, C=35, D=37.
+  std::vector<quickscore::Standing> r2Valid{
+      {1, "A", 1.0},  {2, "B", 1.0},  {3, "C", 1.0},  {4, "D", 1.0},
+      {5, "D", 1.0},  {6, "C", 1.0},  {7, "A", 1.0},  {8, "B", 1.0},
+      {9, "A", 1.0},  {10, "B", 1.0}, {11, "C", 1.0}, {12, "D", 1.0}};
+  assert(swapSession.commit(r2Valid, false));
+  auto trueAfter2R = swapSession.totals();
+  trueAfter2R["A"] -= 14;
+  trueAfter2R["D"] += 14;
+  bool swapChanged = false;
+  assert(swapSession.reconcileWithCumulativeTotals(trueAfter2R, 2, &swapChanged));
+  assert(swapChanged);
+  assert(swapSession.totals() == trueAfter2R);
+  assert(swapSession.teamAdjustments().empty());
+  assert(swapSession.races()[0].standings[0].tag == "D");
+  assert(swapSession.races()[0].standings[11].tag == "A");
+
   std::cout << "quickscore core tests passed\n";
 }
