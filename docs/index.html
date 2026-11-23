@@ -56,6 +56,9 @@
       display: inline-block;
       transform-origin: left top;
     }
+    .team.is-own {
+      color: #FFE600;
+    }
     .overlay-container {
       width: 800px;
       height: 160px;
@@ -168,8 +171,12 @@
             line-height: var(--t6-team-height);
             border-left: var(--t6-border-left);
           }
+        .overlay-container.respect-kusaan.team-num-6 .overlay-inner {
+          padding: 10px 10px;
+        }
         .overlay-container.respect-kusaan.team-num-6 .difs {
           height: var(--t6-dif-height);
+          text-align: left;
         }
           .overlay-container.respect-kusaan.team-num-6 .difs p {
             line-height: var(--t6-dif-height);
@@ -180,13 +187,13 @@
           }
         .overlay-container.respect-kusaan.team-num-6 .left-race {
           position: absolute;
-          right: 0;
-          bottom: 0;
+          right: 10px;
+          bottom: 10px;
           height: var(--t6-dif-height);
           line-height: var(--t6-dif-height);
           color: var(--t2-race-color);
           font-size: var(--t6-race-font);
-          margin-right: 10px;
+          margin-right: 0;
         }
   </style>
 </head>
@@ -289,6 +296,7 @@
       const left =
         raw.left != null ? Number(raw.left) : Math.max(0, totalRaces - raceCount);
 
+      const ownTag = entries[0]?.tag || '';
       if (entries.length === 2) {
         const s0 = entries[0].score;
         const s1 = entries[1].score;
@@ -296,6 +304,7 @@
         return {
           teams: [entries[0].tag, entries[1].tag],
           scores: [s0, s1],
+          ownTag,
           dif: delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : '±0',
           win: left === 0 ? (s0 > s1 ? 1 : s1 > s0 ? 2 : 0) : 0,
           left,
@@ -305,6 +314,7 @@
       return {
         teams: entries.map((e) => e.tag),
         scores: entries.map((e) => e.score),
+        ownTag,
         left,
       };
     }
@@ -321,6 +331,7 @@
       }
       const teams = data.teams;
       const scores = data.scores || [0, 0];
+      const ownTag = data.ownTag || '';
       const left = data.left ?? 12;
       const teamNum = teams.length;
 
@@ -341,6 +352,9 @@
         container.querySelectorAll('.score').forEach(($score, i) => {
           $score.innerText = scores[i] ?? 0;
         });
+        container.querySelectorAll('.team').forEach(($teamEl, i) => {
+          $teamEl.classList.toggle('is-own', Boolean(ownTag) && teams[i] === ownTag);
+        });
         container.querySelectorAll('.team-span').forEach(($team, i) => {
           $team.innerText = teams[i] ?? '';
         });
@@ -358,6 +372,9 @@
       } else {
         container.querySelectorAll('.score').forEach(($score, i) => {
           $score.innerText = scores[i] ?? 0;
+        });
+        container.querySelectorAll('.team').forEach(($teamEl, i) => {
+          $teamEl.classList.toggle('is-own', Boolean(ownTag) && teams[i] === ownTag);
         });
         container.querySelectorAll('.team-span').forEach(($team, i) => {
           $team.innerText = teams[i] ?? '';
