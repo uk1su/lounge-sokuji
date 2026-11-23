@@ -481,6 +481,7 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   diagnostic_->setMinimumWidth(120);
   diagnostic_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
   diagnostic_->setStyleSheet("font-size:10.5px;color:#9aa4b2;");
+  diagnostic_->hide();
   layout->addWidget(diagnostic_);
 
   courseLabel_ = new QLabel;
@@ -527,6 +528,7 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
     userTouchedReview_ = true;
     reviewOpenedMs_ = clock_.elapsed();
   });
+  preview_->hide();
   layout->addWidget(preview_);
 
   reviewHelp_ = new QLabel(tr("右のバッジをクリックしてチームを選択してください。"));
@@ -601,6 +603,7 @@ MainDock::MainDock(QString directory, QWidget *parent, QUrl testDiscordEndpoint,
   raceSelector_->setMinimumContentsLength(6);
   raceSelector_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   raceSelector_->setToolTip(tr("過去のレースを選ぶと、そのまま修正画面が開きます"));
+  raceSelector_->hide();
   layout->addWidget(raceSelector_);
 
   layout->addStretch();
@@ -1525,8 +1528,24 @@ void MainDock::requestStandingsVerification(const Analysis &captured) {
 }
 
 void MainDock::review(const Analysis &analysis, EditMode mode, int raceIndex) {
+  (void)raceIndex;
   if (analysis.standings.size() != 12)
     return;
+  reviewing_ = false;
+  if (confirm_)
+    confirm_->hide();
+  if (reviewSubRow_)
+    reviewSubRow_->hide();
+  if (reviewCourseRow_)
+    reviewCourseRow_->hide();
+  if (preview_)
+    preview_->setEditing(false);
+  if (mode == EditMode::NewRace) {
+    clearCurrentCourse();
+    setStatus(tr("自動判定できなかったためスキップしました（必要なら Discord から修正してください）"),
+              "#ffb74d");
+  }
+  return;
   if (mode == EditMode::NewRace || mode == EditMode::CumulativeReconcile)
     ++generation_;
   pending_ = analysis;
