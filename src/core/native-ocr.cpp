@@ -123,6 +123,16 @@ std::string matchKnownTag(const std::string &recognized, const std::vector<std::
 }
 
 } // namespace quickscore
+#elif defined(__APPLE__)
+#include "mac-ocr.hpp"
+namespace quickscore {
+std::string recognizeNativeText(const std::vector<uint8_t> &gray, int width, int height) {
+  if (gray.size() != static_cast<size_t>(width * height))
+    return {};
+  return macRecognizeGray(gray.data(), width, height);
+}
+std::string matchKnownTag(const std::string &, const std::vector<std::string> &) { return {}; }
+} // namespace quickscore
 #else
 namespace quickscore {
 std::string recognizeNativeText(const std::vector<uint8_t> &, int, int) { return {}; }

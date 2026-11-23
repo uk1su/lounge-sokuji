@@ -978,6 +978,13 @@ void MainDock::startAggregation() {
     QMessageBox::warning(this, tr("設定エラー"), tagError);
     return;
   }
+  if (configuredDiscordUserId().isEmpty()) {
+    QMessageBox::warning(
+        this, tr("設定エラー"),
+        tr("Discord ユーザーID を入力してから開始してください。"));
+    discordUserId_->setFocus();
+    return;
+  }
   if (!session_.races().empty() &&
       (session_.tags() != tags || session_.playersPerTeam() != players)) {
     QMessageBox::warning(this, tr("設定エラー"),

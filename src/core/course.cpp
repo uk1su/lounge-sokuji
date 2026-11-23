@@ -14,6 +14,8 @@
 #include <winrt/Windows.Globalization.h>
 #include <winrt/Windows.Graphics.Imaging.h>
 #include <winrt/Windows.Media.Ocr.h>
+#elif defined(__APPLE__)
+#include "mac-ocr.hpp"
 #endif
 
 namespace quickscore {
@@ -504,6 +506,37 @@ std::optional<std::string> CourseRecognizer::recognize(const QImage &source) {
     }
   }
   return matchCourseName(runOcr(cleanStrip));
+#elif defined(__APPLE__)
+  const QImage im = ensureHdArgb32(source);
+  if (im.isNull())
+    return std::nullopt;
+  auto runMacOcr = [&](const QImage &area) -> std::string {
+    const QImage premul = area.format() == QImage::Format_ARGB32_Premultiplied
+                              ? area
+                              : area.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    return macRecognizeBgra(premul.constBits(), premul.width(), premul.height());
+  };
+  const QImage strip = im.copy(510, 68, 1280, 124);
+  if (auto matched = matchCourseName(runMacOcr(strip)))
+    return matched;
+  QImage cleanStrip(strip.size(), QImage::Format_ARGB32_Premultiplied);
+  for (int y = 0; y < strip.height(); ++y) {
+    const QRgb *srcLine = reinterpret_cast<const QRgb *>(strip.constScanLine(y));
+    QRgb *dstLine = reinterpret_cast<QRgb *>(cleanStrip.scanLine(y));
+    for (int x = 0; x < strip.width(); ++x) {
+      const QRgb p = srcLine[x];
+      const int r = qRed(p), g = qGreen(p), b = qBlue(p);
+      const int minv = std::min({r, g, b});
+      const int maxv = std::max({r, g, b});
+      int v = 255;
+      if (maxv - minv <= 45) {
+        const int luma = (r + g + b) / 3;
+        v = std::clamp((luma - 55) * 255 / 60, 0, 255);
+      }
+      dstLine[x] = qRgba(v, v, v, 255);
+    }
+  }
+  return matchCourseName(runMacOcr(cleanStrip));
 #else
   (void)source;
   return std::nullopt;

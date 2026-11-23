@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.23)
 project(mk8dx-quickscore VERSION 0.8.12 LANGUAGES CXX)
+if(APPLE)
+  enable_language(OBJCXX)
+endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -38,8 +41,13 @@ if(QUICKSCORE_DEPENDENCIES)
       set(library_name obs-frontend-api)
     endif()
     add_library(OBS::${component} UNKNOWN IMPORTED)
+    if(APPLE)
+      set(obs_lib_path "${QUICKSCORE_DEPENDENCIES}/lib/lib${library_name}.dylib")
+    else()
+      set(obs_lib_path "${QUICKSCORE_DEPENDENCIES}/lib/${library_name}.lib")
+    endif()
     set_target_properties(OBS::${component} PROPERTIES
-      IMPORTED_LOCATION "${QUICKSCORE_DEPENDENCIES}/lib/${library_name}.lib"
+      IMPORTED_LOCATION "${obs_lib_path}"
       INTERFACE_INCLUDE_DIRECTORIES "${QUICKSCORE_DEPENDENCIES}/include")
   endforeach()
 else()
@@ -51,6 +59,9 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 set(core_sources src/core/analysis.cpp src/core/course.cpp src/core/finish-notice.cpp src/core/native-ocr.cpp
     src/core/overlay.cpp src/core/score-digits.cpp src/core/scoring.cpp src/core/session-store.cpp
     src/reference/image.cpp src/reference/recognizer.cpp src/core/fast-reader.cpp)
+if(APPLE)
+  list(APPEND core_sources src/core/mac-ocr.mm)
+endif()
 set(dock_sources src/ui/main-dock.cpp src/obs/frame-capture.cpp src/obs/overlay-server.cpp
     src/obs/scoreboard-source.cpp src/core/credential-store.cpp src/core/discord-sender.cpp
     src/core/local-reader.cpp src/core/result-capture.cpp src/core/jev-api-reader.cpp)
@@ -64,6 +75,8 @@ function(configure_core target)
   if(WIN32)
     target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(${target} PRIVATE windowsapp windowscodecs ole32 advapi32)
+  elseif(APPLE)
+    target_link_libraries(${target} PRIVATE "-framework Vision" "-framework CoreGraphics" "-framework Foundation")
   endif()
   if(MSVC)
     target_compile_options(${target} PRIVATE /await /utf-8 /W3)
@@ -72,8 +85,21 @@ endfunction()
 add_library(mk8dx-quickscore MODULE src/plugin-main.cpp ${core_sources} ${dock_sources})
 configure_core(mk8dx-quickscore)
 target_link_libraries(mk8dx-quickscore PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Widgets Qt6::Network)
-install(TARGETS mk8dx-quickscore LIBRARY DESTINATION bin/64bit RUNTIME DESTINATION bin/64bit)
-install(DIRECTORY data/ DESTINATION data PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
+if(APPLE)
+  set_target_properties(mk8dx-quickscore PROPERTIES
+    BUNDLE TRUE
+    BUNDLE_EXTENSION "plugin"
+    PREFIX ""
+    MACOSX_BUNDLE_BUNDLE_NAME "mk8dx-quickscore"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "jp.itf.mk8dx-quickscore"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+  )
+  install(TARGETS mk8dx-quickscore LIBRARY DESTINATION . BUNDLE DESTINATION .)
+else()
+  install(TARGETS mk8dx-quickscore LIBRARY DESTINATION bin/64bit RUNTIME DESTINATION bin/64bit)
+  install(DIRECTORY data/ DESTINATION data PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
+endif()
 get_target_property(qt_core_location Qt6::Core IMPORTED_LOCATION_RELEASE)
 get_filename_component(qt_bin "${qt_core_location}" DIRECTORY)
 get_filename_component(qt_root "${qt_bin}" DIRECTORY)
@@ -118,8 +144,14 @@ if(BUILD_TESTING)
     target_compile_options(scoring-test PRIVATE /UNDEBUG)
     target_compile_options(vision-test PRIVATE /UNDEBUG)
   endif()
-  set_tests_properties(analysis-test local-test capture-test fast-test jev-api-test PROPERTIES
-    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${qt_bin}"
-    ENVIRONMENT "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${qt_root}/plugins"
-    TIMEOUT 30)
+  if(WIN32)
+    set_tests_properties(analysis-test local-test capture-test fast-test jev-api-test PROPERTIES
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${qt_bin}"
+      ENVIRONMENT "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${qt_root}/plugins"
+      TIMEOUT 30)
+  else()
+    set_tests_properties(analysis-test local-test capture-test fast-test jev-api-test PROPERTIES
+      ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+      TIMEOUT 30)
+  endif()
 endif()

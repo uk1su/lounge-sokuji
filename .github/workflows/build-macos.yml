@@ -1,0 +1,70 @@
+name: Build macOS Plugin
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies (Qt6 & OBS deps)
+        run: |
+          brew install cmake ninja qt@6
+
+      - name: Download OBS Studio headers and frameworks
+        run: |
+          curl -L -o obs.dmg "https://github.com/obsproject/obs-studio/releases/download/31.1.1/OBS-Studio-31.1.1-macOS-Apple.dmg"
+          hdiutil attach obs.dmg -mountpoint /Volumes/OBS -nobrowse
+          cp -R /Volumes/OBS/OBS.app /Applications/OBS.app
+          hdiutil detach /Volumes/OBS
+          git clone --depth 1 --branch 31.1.1 https://github.com/obsproject/obs-studio.git /tmp/obs-src
+
+      - name: Prepare OBS SDK directory
+        run: |
+          mkdir -p /tmp/obs-sdk/include /tmp/obs-sdk/lib
+          cp -R /tmp/obs-src/libobs /tmp/obs-sdk/include/
+          cp /tmp/obs-src/libobs/*.h /tmp/obs-sdk/include/ 2>/dev/null || true
+          cp /tmp/obs-src/UI/obs-frontend-api/obs-frontend-api.h /tmp/obs-sdk/include/
+          cp /Applications/OBS.app/Contents/Frameworks/libobs.framework/Versions/A/libobs /tmp/obs-sdk/lib/libobs.dylib
+          cp /Applications/OBS.app/Contents/Frameworks/obs-frontend-api.framework/Versions/A/obs-frontend-api /tmp/obs-sdk/lib/libobs-frontend-api.dylib
+
+      - name: Configure and Build
+        env:
+          JEV_KEY: ${{ secrets.QUICKSCORE_EMBEDDED_JEV_API_KEY }}
+          BOT_ENDPOINT: ${{ secrets.QUICKSCORE_EMBEDDED_BOT_ENDPOINT }}
+          BOT_CHANNEL: ${{ secrets.QUICKSCORE_EMBEDDED_BOT_CHANNEL_ID }}
+          BOT_KEY: ${{ secrets.QUICKSCORE_EMBEDDED_BOT_INGEST_KEY }}
+        run: |
+          QT_PREFIX="$(brew --prefix qt@6)"
+          cmake -S . -B build-macos -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX;/Applications/OBS.app/Contents/Frameworks" \
+            -DQUICKSCORE_DEPENDENCIES="/tmp/obs-sdk" \
+            -DQUICKSCORE_EMBEDDED_JEV_API_KEY="$JEV_KEY" \
+            -DQUICKSCORE_EMBEDDED_BOT_ENDPOINT="$BOT_ENDPOINT" \
+            -DQUICKSCORE_EMBEDDED_BOT_CHANNEL_ID="$BOT_CHANNEL" \
+            -DQUICKSCORE_EMBEDDED_BOT_INGEST_KEY="$BOT_KEY" \
+            -DBUILD_TESTING=OFF
+          cmake --build build-macos --parallel 4
+
+      - name: Package macOS ZIP
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('buildspec.json'))['version'])")
+          PKG="dist/QuickScore-Jev-API-${VERSION}-macOS-arm64"
+          mkdir -p "$PKG"
+          cp -R build-macos/mk8dx-quickscore.plugin "$PKG/"
+          mkdir -p "$PKG/mk8dx-quickscore.plugin/Contents/Resources"
+          cp -R data/* "$PKG/mk8dx-quickscore.plugin/Contents/Resources/"
+          cp install.command install-macos.sh README.md LICENSE "$PKG/"
+          chmod +x "$PKG/install.command" "$PKG/install-macos.sh"
+          codesign --force --deep --sign - "$PKG/mk8dx-quickscore.plugin"
+          (cd dist && zip -r "QuickScore-Jev-API-${VERSION}-macOS-arm64.zip" "QuickScore-Jev-API-${VERSION}-macOS-arm64")
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickScore-Jev-API-macOS-arm64
+          path: dist/*.zip
