@@ -920,7 +920,7 @@ void MainDock::stopAggregation(bool autoFinished, bool syncOverlay) {
   if (autoFinished) {
     loungeOverlayActive_ = true;
     if (!loungeOverlayUntilUtc_.isValid())
-      loungeOverlayUntilUtc_ = QDateTime::currentDateTimeUtc().addSecs(60);
+      loungeOverlayUntilUtc_ = QDateTime::currentDateTimeUtc().addSecs(300);
   } else {
     loungeOverlayActive_ = false;
     loungeOverlayUntilUtc_ = {};
@@ -1328,6 +1328,31 @@ void MainDock::requestRecognition(const Analysis &captured) {
   requestCycle_ = gate_.cycle();
   gate_.lock();
   const auto generation = generation_;
+  if (!lastCommittedFrame_.isNull() && lastCommittedFrame_.size() == captured.image.size() &&
+      captured.image.width() >= 1860 && captured.image.height() >= 1020) {
+    const QImage cur = captured.image.format() == QImage::Format_ARGB32
+                           ? captured.image
+                           : captured.image.convertToFormat(QImage::Format_ARGB32);
+    const QImage prev = lastCommittedFrame_.format() == QImage::Format_ARGB32
+                            ? lastCommittedFrame_
+                            : lastCommittedFrame_.convertToFormat(QImage::Format_ARGB32);
+    double diffSum = 0.0;
+    int samples = 0;
+    for (int y = 80; y < 1000; y += 6) {
+      const QRgb *cLine = reinterpret_cast<const QRgb *>(cur.constScanLine(y));
+      const QRgb *pLine = reinterpret_cast<const QRgb *>(prev.constScanLine(y));
+      for (int x = 960; x < 1840; x += 6) {
+        diffSum += std::abs(qRed(cLine[x]) - qRed(pLine[x])) +
+                   std::abs(qGreen(cLine[x]) - qGreen(pLine[x])) +
+                   std::abs(qBlue(cLine[x]) - qBlue(pLine[x]));
+        ++samples;
+      }
+    }
+    if (samples > 0 && (diffSum / double(samples * 3)) < 4.0) {
+      setStatus(tr("前回と同一のリザルトのためスキップしました。"));
+      return;
+    }
+  }
   const auto requestedAt = clock_.elapsed();
   QJsonArray tags;
   for (const auto &tag : session_.tags())
