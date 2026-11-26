@@ -1348,7 +1348,7 @@ void MainDock::requestRecognition(const Analysis &captured) {
         ++samples;
       }
     }
-    if (samples > 0 && (diffSum / double(samples * 3)) < 4.0) {
+    if (samples > 0 && (diffSum / double(samples * 3)) < 12.0) {
       setStatus(tr("前回と同一のリザルトのためスキップしました。"));
       return;
     }
